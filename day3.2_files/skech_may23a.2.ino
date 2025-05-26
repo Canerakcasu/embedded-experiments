@@ -7,9 +7,9 @@
 #include <SPI.h>            
 
 // --- Ağ Ayarları ---
-const char* ssid = "Ents_Test";
-const char* password = "12345678";
-IPAddress local_IP(192, 168, 20, 21);
+const char* ssid = "WIFI-NAME";
+const char* password = "WIFI_PASSWORD";
+IPAddress local_IP(192, 168, XX, XX);
 IPAddress gateway(192, 168, 20, 1);
 IPAddress subnet(255, 255, 255, 0);
 
