@@ -23,7 +23,7 @@ This project demonstrates how to run **separate tasks on each core** of the ESP3
 
 This project helps **visualize the concurrent execution** of code on both ESP32 cores via Serial output.
 
----
+
 
 ## 📁 Project 2: Dual-Core LED Control with Button Interrupt
 
@@ -113,6 +113,3 @@ This project demonstrates **interactive dual-core usage** with:
 6. Open **Serial Monitor** at `115200 baud` and observe dual-core behavior.
 
 ---
-
-## 🖼️ Example Serial Monitor Output
-
