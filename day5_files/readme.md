@@ -102,7 +102,7 @@ Open **Library Manager** and install:
 Edit the `.ino` file:
 
 #### WiFi Credentials:
-```cpp
+cpp
 const char* ssid = "Your_WiFi_SSID";
 const char* password = "Your_WiFi_Password";
 MP3 Track Names:
