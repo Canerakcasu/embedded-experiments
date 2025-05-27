@@ -1,3 +1,4 @@
+
 # ESP32 Advanced Control Hub
 
 This project transforms an ESP32 microcontroller into a versatile control hub, featuring a web interface for managing an ARGB LED strip, a DFPlayer Mini MP3 module, and monitoring various inputs. Control is also possible via a directly connected rotary encoder.
@@ -189,4 +190,4 @@ MQTT integration with Home Assistant
 Feel free to fork, improve, and submit pull requests. Issues and suggestions are welcome!
 
 🖼️ Web Interface Preview
-(day5_files/images/esp32_web_ui.png)
+![esp32_web_ui](https://github.com/user-attachments/assets/3d6c1a19-a373-4bdb-b675-3f2b06ada05c)
