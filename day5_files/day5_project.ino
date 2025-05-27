@@ -8,8 +8,8 @@
 #include <AiEsp32RotaryEncoder.h>
 #include <Preferences.h>
 
-const char* ssid = "Ents_Test";
-const char* password = "12345678";
+const char* ssid = "YOUR_WIFI_ID";
+const char* password = "YOUR-WIFI_PASSOWRD";
 WebServer server(80);
 
 #define LED_PIN         2
