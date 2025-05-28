@@ -1,0 +1,191 @@
+Project Research & Learnings: ESP32 Stepper Motor Control
+This report summarizes the research, component details, and troubleshooting experience gained during the development of the Interactive Stepper Motor Control with ESP32 and Rotary Encoder project.
+
+1. Component Identification and Research
+a) Stepper Motor (17PM-K343CN03CA)
+Type: NEMA 17 Hybrid Stepper Motor
+
+Specifications (Estimated):
+
+Step Angle: 1.8° (200 steps per revolution, full-step mode)
+
+Nominal Current: ~0.9 A per phase
+
+Phase Resistance: ~4 Ω
+
+Nominal Voltage: ~3.6 V (typically driven at 12V–24V with driver modules)
+
+Holding Torque: ~310 mN·m
+
+Wire Count: 4 (Bipolar configuration)
+
+Learnings:
+Without an official datasheet, it is crucial to identify coil pairs using a multimeter (resistance check). Correct coil pairing and wiring order is essential to achieve proper rotation.
+
+b) Stepper Driver Modules (A4988 / DRV8825)
+Purpose:
+Convert step and direction signals from the ESP32 into precise coil energizing sequences at the correct current level.
+
+A4988 (Green Module):
+
+Motor Voltage: 8–35 V
+
+Logic Voltage: 3–5.5 V
+
+Current: ~1 A (no heatsink), up to 2 A (with heatsink)
+
+Microstepping: Full, 1/2, 1/4, 1/8, 1/16
+
+Current Limit Formula: 
+𝐼
+𝑚
+𝑎
+𝑥
+=
+𝑉
+𝑅
+𝐸
+𝐹
+8
+×
+𝑅
+𝐶
+𝑆
+I 
+max
+​
+ = 
+8×R 
+CS
+​
+ 
+V 
+REF
+​
+ 
+​
+ 
+
+DRV8825 (Purple Module):
+
+Motor Voltage: 8.2–45 V
+
+Current: ~1.5 A (no heatsink), up to 2.2 A (with heatsink)
+
+Microstepping: Full, up to 1/32
+
+Current Limit Approximation: 
+𝐼
+=
+𝑉
+𝑅
+𝐸
+𝐹
+×
+2
+I=V 
+REF
+​
+ ×2
+
+Has a Fault (FLT) pin to indicate driver issues
+
+Learnings:
+Correctly adjusting the driver current limit (Vref) via the onboard potentiometer is critical to avoid hardware damage. The Enable (EN) pin controls motor energization.
+
+c) Stepper Driver Board V1.0 (A-props.com)
+Description:
+A breakout/carrier board designed for Pololu-style stepper drivers, simplifying wiring.
+
+Features:
+
+Motor power inputs (VMOT, GND)
+
+Motor outputs (1A, 1B, 2A, 2B)
+
+Control signal inputs (ST1 = STEP, DIR, EN, MS1-3 for microstepping)
+
+Fuse protection
+
+Learnings:
+Pin naming conventions may vary from typical Pololu boards; understanding board documentation is necessary to wire correctly.
+
+d) ESP32-WROOM-32
+Characteristics:
+
+3.3V logic-level microcontroller with Wi-Fi/Bluetooth
+
+Numerous GPIO pins with interrupt capabilities
+
+Compatible with stepper driver input signals
+
+Learnings:
+Using interrupts for rotary encoder input handling improves responsiveness and accuracy.
+
+e) Rotary Encoder (EC11 Type)
+Function:
+Converts rotational position into digital signals (CLK, DT) plus a push button (SW).
+
+Operation:
+CLK and DT pins produce quadrature signals enabling detection of rotation direction and steps.
+
+Learnings:
+Debouncing and proper interrupt handling are essential for reliable encoder reading. Using a dedicated library (AiEsp32RotaryEncoder) simplifies integration.
+
+2. Working Principles
+Stepper Motor:
+The motor shaft moves in discrete steps by sequentially energizing coils, following the driver’s control pulses.
+
+Stepper Driver:
+Interprets STEP pulses to move the motor one microstep or full step at a time; DIR signal determines rotation direction.
+
+Rotary Encoder:
+Generates directional pulses interpreted by the ESP32, which translates these into motor steps and speed.
+
+3. Wiring and Setup Process
+Challenges:
+
+Identifying motor coil pairs without color codes required careful multimeter measurements.
+
+Establishing a shared ground reference between ESP32 and driver board was mandatory.
+
+Understanding driver board pin mappings (e.g., ST1 for STEP) was critical.
+
+Ensuring power supplies are properly separated: motor driver powered by 12V or 24V, ESP32 powered by USB (3.3V logic).
+
+4. Current Adjustment (Vref)
+The most critical setup step: adjusting the driver’s current limit to protect motor and driver.
+
+Vref tuning was performed with a multimeter and screwdriver to set approximately 70-80% of motor nominal current.
+
+5. Code Development and Troubleshooting
+Development Steps:
+
+Started with basic motor rotation code (forward/backward).
+
+Integrated rotary encoder readings using AiEsp32RotaryEncoder.
+
+Implemented interrupt service routines (ISRs) for immediate encoder response.
+
+Added start/stop control via rotary encoder button and the driver's Enable (EN) pin.
+
+Common Issues & Solutions:
+
+Motor vibrates but doesn’t turn: Usually incorrect coil wiring; swapping coil pairs resolved this.
+
+Motor doesn’t move: Checked power connections, logic levels on EN pin, and motor wiring.
+
+Encoder reading errors: Verified wiring and improved debouncing and ISR usage.
+
+Speed adjustments: Modified delay values in the code to optimize motor smoothness.
+
+Conclusion
+This project validated that an ESP32 combined with a rotary encoder and a stepper driver can deliver precise, interactive control of a stepper motor. It highlighted the importance of:
+
+Thorough component research and correct wiring.
+
+Careful current limiting setup.
+
+Leveraging libraries and interrupts for accurate encoder handling.
+
+Systematic troubleshooting for motor behavior issues.
