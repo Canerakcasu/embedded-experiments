@@ -19,3 +19,5 @@ Okuyucu 1 <<<--- Kart UID: 71 83 A1 27(mehmet)
 Okuyucu 2 --->>> Kart UID: 75 41 61 9A(caner)
 
 Okuyucu 2 --->>> Kart UID: C9 51 82 83(huseyin)
+
+
