@@ -1,0 +1,21 @@
+
+RFID 1
+
+RST PIN 22 ORANGE ORANGE
+SDA PIN 15 GREEN GREEN
+SCK PIN 18 YELLOW BLUE 
+*** MOSI PIN 23 RED RED ***
+
+RFID 2
+SDA PIN4 WHITE PURPLE
+
+
+Okuyucu 1 <<<--- Kart UID: FA 44 A9 00(ali)
+
+
+Okuyucu 1 <<<--- Kart UID: 71 83 A1 27(mehmet)
+
+
+Okuyucu 2 --->>> Kart UID: 75 41 61 9A(caner)
+
+Okuyucu 2 --->>> Kart UID: C9 51 82 83(huseyin)
