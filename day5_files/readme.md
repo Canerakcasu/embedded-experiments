@@ -1,3 +1,4 @@
+
 # ESP32 Advanced Control Hub
 
 This project transforms an ESP32 microcontroller into a versatile control hub, featuring a web interface for managing an ARGB LED strip, a DFPlayer Mini MP3 module, and monitoring various inputs. Control is also possible via a directly connected rotary encoder.
@@ -94,7 +95,7 @@ Open **Library Manager** and install:
 Edit the `.ino` file:
 
 #### WiFi Credentials:
-```cpp
+cpp
 const char* ssid = "Your_WiFi_SSID";
 const char* password = "Your_WiFi_Password";
 MP3 Track Names:
@@ -181,6 +182,7 @@ MQTT integration with Home Assistant
 Feel free to fork, improve, and submit pull requests. Issues and suggestions are welcome!
 
 🖼️ Web Interface Preview
+<<<<<<< HEAD
 (day5_files/images/esp32_web_ui.png)
 
 # IR Remote Control Integration – ESP32 Project
@@ -306,3 +308,92 @@ The listed HEX codes are remote-specific. To use another remote:
 ### ✅ License
 
 This project is open-source and available under the MIT License.
+=======
+![esp32_web_ui](https://github.com/user-attachments/assets/3d6c1a19-a373-4bdb-b675-3f2b06ada05c)
+
+
+
+🧠 Node-RED Integration & Dashboard
+This project can be controlled and monitored through a Node-RED dashboard, communicating with the ESP32 via MQTT.
+
+🔌 MQTT Broker
+Broker Address: 192.168.20.208
+
+Port: 1883
+
+Make sure both the ESP32 and the Node-RED instance are configured to use this broker. The current ESP32 sketch does not implement MQTT username/password authentication.
+
+🧭 Node-RED Flow Overview
+The Node-RED flow subscribes to various status topics published by the ESP32 and sends commands via MQTT to control peripherals.
+
+![node-RED_flow](https://github.com/user-attachments/assets/bbc698dc-3e10-467c-a28c-8e01faffa907)
+
+
+
+🖥️ Node-RED Dashboard UI
+The Node-RED dashboard provides a user-friendly interface to:
+
+Monitor system status (WiFi SSID, SD Card, Encoder state)
+
+Control LED strip:
+
+Power on/off
+
+Brightness adjustment
+
+RGB color selection via color picker
+
+Control DFPlayer Mini:
+
+Volume
+
+Track selection
+
+Playback (play/pause, next, previous)
+
+![node-RED_dashboard](https://github.com/user-attachments/assets/6c0e2971-d93b-4d23-9dbe-4c943bd21ac8)
+
+
+📡 Key MQTT Topics Used
+ESP32 Publishes (Status):
+Topic	Description
+esp32/status/wifiSSID	Current WiFi network SSID
+esp32/status/encoderMode	Current rotary encoder mode
+esp32/status/encoderButton	Encoder button state (GPIO 14)
+esp32/status/buttonD12	External button state (GPIO 12)
+esp32/status/sdCard	SD Card status: "ONLINE" or "OFFLINE"
+esp32/status/ledsOn	LED power state: "ON" or "OFF"
+esp32/status/brightness	LED brightness (0-255)
+esp32/status/led/colorRGB	Current LED color (e.g., "255,128,0")
+esp32/status/dfVolume	DFPlayer volume (0–30 or -1 if error)
+esp32/status/dfTrackNumber	Current DFPlayer track number
+esp32/status/dfTrackName	Current DFPlayer track name
+
+Node-RED Publishes (Commands):
+Topic	Payload Example	Description
+esp32/command/led/state	"ON" or "OFF"	Toggle LED power
+esp32/command/led/brightness	"0"–"255"	Set LED brightness
+esp32/command/led/colorRGB	"R,G,B" (e.g., "128,64,255")	Set LED color
+esp32/command/dfplayer/volume	"0"–"30"	Set DFPlayer volume
+esp32/command/dfplayer/playTrack	"1"	Play specific track number
+esp32/command/dfplayer/action	"PLAY_CURRENT", "PAUSE", "NEXT", "PREV"	Control playback
+
+🛠️ Setting Up in Node-RED
+Install node-red-dashboard via the Palette Manager if not already present.
+
+Configure an MQTT broker connection to 192.168.20.208 on port 1883.
+
+Import or create the flow:
+
+Use mqtt in and mqtt out nodes for subscribing/publishing.
+
+Use ui_button, ui_slider, ui_text, and ui_colour_picker to build the dashboard interface.
+
+Use Function nodes to:
+
+Format color picker output (e.g., convert object {r,g,b} into "R,G,B" string).
+
+Convert slider/button outputs to valid command payloads.
+
+Use rbe (Report by Exception) nodes to prevent redundant updates and UI feedback loops.
+>>>>>>> 6ada137bcebbd272c4a5b5199a9a7cbf0980aaf2

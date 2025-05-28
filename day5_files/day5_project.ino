@@ -10,18 +10,8 @@
 #include <Preferences.h>
 #include <PubSubClient.h>
 
-const char* ssid = "YOUR_WIFI_ID";
-const char* password = "PASSWORD";
-
-const char* mqtt_server = "192.168.20.208";
-const int mqtt_port = 1883;
-const char* mqtt_client_id = "ESP32_ControlHub_GM_IRSim";
-
-WiFiClient espClient;
-PubSubClient mqttClient(espClient);
-unsigned long lastMqttPublishTime = 0;
-const long mqttPublishInterval = 3000; 
-
+const char* ssid = "Ents_Test";
+const char* password = "12345678";
 WebServer server(80);
 
 #define LED_PIN         2
@@ -643,4 +633,6 @@ void handleIrActionFromWeb() { // Yeni web handler IR simülasyonu için
     publishStatusMQTT(); 
 }
 
-void handleNotFound() { /* Same */ server.send(404, "text/plain", "Not Found"); }
+void handleNotFound() {
+    server.send(404, "text/plain", "Not Found");
+}
