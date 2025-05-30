@@ -45,3 +45,45 @@ const char* WIFI_PASSWORD = "Your_WiFi_Password";
 
 #define ARGB_LED_PIN 2     // GPIO for LED data
 #define TOTAL_LEDS 15      // Number of LEDs
+[IMG_0621](https://github.com/user-attachments/assets/c6ec8d8f-7f8a-49fc-ba62-1db25cd2e85c)
+
+📌 Tip: Use a logic level shifter if your strip needs 5V logic.
+
+Usage
+Wire the hardware as described
+
+Update and upload code to your ESP board
+
+Open Serial Monitor @ 115200 baud
+
+Send commands to your bot on Telegram:
+
+Telegram Commands
+Command	Description
+/start	Show available commands
+/strip_on or ledon	Turn strip ON
+/strip_off or ledoff	Turn strip OFF
+/rgb R G B	Set color (e.g. /rgb 255 0 0 = red)
+/brightness VALUE	Brightness (0-255)
+/strip_status or ledstatus	Show current status
+
+Commands are case-insensitive for simple ones (ledon, ledoff, etc.).
+
+Troubleshooting
+No response / No LED action:
+
+Check BOT_TOKEN, CHAT_ID, Wi-Fi credentials
+
+Make sure bot is started and you've sent a message to it
+
+Power supply sufficient? GND connected properly?
+
+Test BOT token: https://api.telegram.org/bot<BOT_TOKEN>/getMe
+
+LEDs flicker / wrong color:
+
+Use logic level shifter
+
+Check LED count matches TOTAL_LEDS
+
+Avoid long, unstable jumper wires
