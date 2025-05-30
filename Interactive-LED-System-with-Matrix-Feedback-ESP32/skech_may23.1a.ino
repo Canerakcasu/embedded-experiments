@@ -3,10 +3,9 @@
 #include <Adafruit_NeoPixel.h>
 #include <ArduinoJson.h>
 #include <ESP32Encoder.h>
-#include <MD_Parola.h>      // --- ADDED FOR MATRIX DISPLAY ---
-#include <MD_MAX72xx.h>     // --- ADDED FOR MATRIX DISPLAY ---
-#include <SPI.h>            // --- ADDED FOR MATRIX DISPLAY (SPI) ---
-
+#include <MD_Parola.h>     
+#include <MD_MAX72xx.h>     
+#include <SPI.h>            
 // --- Wi-Fi Settings ---
 const char* ssid = "WIFI_NAME";         
 const char* password = "WIFI_PASSWORD";    
@@ -29,7 +28,7 @@ Adafruit_NeoPixel strip(ARGB_LED_COUNT, ARGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 #define ENCODER_DT_PIN  35
 #define ENCODER_SW_PIN  34
 
-// --- MAX7219 Pin Definitions --- // --- ADDED FOR MATRIX DISPLAY ---
+// --- MAX7219 Pin Definitions 
 #define HARDWARE_TYPE MD_MAX72XX::FC16_HW // Change if your module type is different (FC16 is common)
 #define MAX_DEVICES 4   // Number of 8x8 modules you have
 #define CLK_PIN     2   // Your D2 pin for CLK
@@ -39,7 +38,7 @@ Adafruit_NeoPixel strip(ARGB_LED_COUNT, ARGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 // --- MD_Parola & MD_MAX72XX Setup --- // --- ADDED FOR MATRIX DISPLAY ---
 MD_Parola P = MD_Parola(HARDWARE_TYPE, DATA_PIN, CLK_PIN, CS_PIN, MAX_DEVICES);
 
-// --- Global Variables for Matrix Display State --- // --- ADDED FOR MATRIX DISPLAY ---
+// --- Global Variables for Matrix Disply State --- //
 enum DisplayState {
   SHOW_BRIGHTNESS,
   SHOW_LED0_COLOR,
@@ -196,7 +195,7 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
-  // --- Initialize Parola Matrix Display --- // --- ADDED FOR MATRIX DISPLAY ---
+  // --- Initialize Parola Matrix Display --- 
   P.begin();
   P.setIntensity(5); // Set matrix brightness (0-15)
   P.displayClear();
@@ -280,7 +279,7 @@ void loop() {
   }
   lastSwitchState = isPressed;
 
-  // --- Update Matrix Display Cyclically or on Force Update --- // --- MODIFIED FOR MATRIX DISPLAY ---
+  // --- Update Matrix Display Cyclically or on Force Update ---
   if (forceMatrixUpdate || (millis() - lastDisplayUpdateTime > DISPLAY_UPDATE_INTERVAL)) {
     char displayText[40] = ""; // Buffer for text to display on matrix
 

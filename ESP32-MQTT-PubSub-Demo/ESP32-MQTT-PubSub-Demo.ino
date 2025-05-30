@@ -23,7 +23,7 @@ void setup_wifi() {
   }
   Serial.println("");
   Serial.println("WiFi'ye bağlandı");
-  Serial.print("IP adresi: ");
+  Serial.print("IP adresi: ");gem
   Serial.println(WiFi.localIP());
 }
 
