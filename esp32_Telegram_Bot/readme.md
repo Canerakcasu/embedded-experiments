@@ -45,7 +45,8 @@ const char* WIFI_PASSWORD = "Your_WiFi_Password";
 
 #define ARGB_LED_PIN 2     // GPIO for LED data
 #define TOTAL_LEDS 15      // Number of LEDs
-[IMG_0621](https://github.com/user-attachments/assets/c6ec8d8f-7f8a-49fc-ba62-1db25cd2e85c)
+```
+![IMG_0621](https://github.com/user-attachments/assets/a3af9877-d6f4-46dc-8fea-12159a1380a0)
 
 📌 Tip: Use a logic level shifter if your strip needs 5V logic.
 
