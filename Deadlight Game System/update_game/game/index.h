@@ -13,129 +13,143 @@ const char index_html[] PROGMEM = R"rawliteral(
             --accent-color: #BB86FC; --text-color: #E0E0E0; --danger-color: #CF6679;
             --font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
-        body { background-color: var(--bg-color); color: var(--text-color); font-family: var(--font-family); margin: 0; padding: 20px; }
-        .container { max-width: 1200px; margin: auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
-        .card { background-color: var(--card-color); border-radius: 12px; padding: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+        body { background-color: var(--bg-color); color: var(--text-color); font-family: var(--font-family); margin: 0; padding: 20px; text-align: center; }
+        .container { max-width: 800px; margin: auto; text-align: left; }
+        .card { background-color: var(--card-color); border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
         h2 { margin-top: 0; color: var(--primary-color); border-bottom: 1px solid #333; padding-bottom: 10px; }
-        .status-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #333; }
-        .status-item:last-child { border-bottom: none; }
-        .status-dot { width: 14px; height: 14px; border-radius: 50%; transition: all 0.3s; }
-        .online { background-color: #32ff7e; box-shadow: 0 0 8px #32ff7e; }
-        .offline { background-color: #777; }
+        .grid-container { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
         .display {
             background-color: rgba(0,0,0,0.3); padding: 15px; border-radius: 8px; text-align: center;
-            font-size: 1.1em; font-weight: bold; margin-bottom: 15px; color: var(--accent-color); min-height: 25px; 
+            font-size: 1.2em; font-weight: bold; margin-bottom: 15px; color: var(--accent-color); min-height: 28px; 
             word-wrap: break-word; font-family: 'Courier New', Courier, monospace;
         }
-        .button-group { display: flex; gap: 10px; }
+        #timer-display { font-size: 2.5em; color: var(--danger-color); letter-spacing: 3px; }
         label { display: block; margin-bottom: 8px; font-weight: bold; color: var(--primary-color); }
-        select, button, input[type=range] {
-            width: 100%; padding: 12px; border-radius: 5px; border: none; font-size: 1em; cursor: pointer;
-            margin-top: 10px; transition: background-color 0.2s, filter 0.2s; box-sizing: border-box;
-        }
+        button, select { width: 100%; padding: 12px; border-radius: 5px; border: none; font-size: 1em; cursor: pointer; margin-top: 10px; transition: background-color 0.2s, filter 0.2s; box-sizing: border-box; }
         button { background-color: var(--accent-color); color: #121212; font-weight: bold; }
         button:hover:not(:disabled) { filter: brightness(1.2); }
         button:disabled { background-color: #444; color: #777; cursor: not-allowed; }
         select { background-color: #333; color: var(--text-color); }
-        .btn-danger { background-color: var(--danger-color); color: white; }
         .control-group { margin-top: 20px; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="card">
-            <h2>Control Panel</h2>
-            <label>Game Status</label>
-            <div class="display" id="game-state">Connecting...</div>
-            <label>Level Details</label>
-            <div class="display" id="level-detail">--</div>
-            <div class="button-group">
-                <button id="startButton" onclick="sendAction('start_game')">START GAME</button>
-                <button class="btn-danger" onclick="sendAction('reset_game')">RESET SYSTEM</button>
-            </div>
+            <h2 data-lang-key="timerTitle">Game Timer</h2>
+            <div class="display" id="timer-display">10:00</div>
         </div>
-        <div class="card">
-            <h2>Live Monitor</h2>
-            <label>Matrix Display</label>
-            <div class="display" id="matrix-display">--</div>
-        </div>
-        <div class="card">
-            <h2>Settings</h2>
-            <div class="control-group">
-                <label for="language-select">Game Language</label>
-                <select id="language-select" onchange="sendAction('set_language', this.value)">
-                    <option value="TR">Turkce</option><option value="EN">English</option>
-                </select>
+        <div class="grid-container">
+            <div class="card">
+                <h2 data-lang-key="controlPanelTitle">Control Panel</h2>
+                <label data-lang-key="gameStatusLabel">Game Status</label>
+                <div class="display" id="game-state">Connecting...</div>
+                <label data-lang-key="levelDetailLabel">Level Details</label>
+                <div class="display" id="level-detail">--</div>
+                <button id="startButton" onclick="sendAction('start_game')" data-lang-key="startButton">START GAME</button>
             </div>
-            <div class="control-group">
-                <label>Volume: <span id="volume-value">5</span></label>
-                <input type="range" id="volume-slider" min="0" max="30" value="5" style="width: 100%;" oninput="sendAction('set_volume', this.value)">
+            <div class="card">
+                <h2 data-lang-key="settingsTitle">Settings</h2>
+                <div class="control-group">
+                    <label for="sound-language-select" data-lang-key="soundLanguageLabel">Sound Language</label>
+                    <select id="sound-language-select" onchange="sendAction('set_sound_language', this.value)">
+                        <option value="TR">Turkce</option><option value="EN">English</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label for="ui-language-select" data-lang-key="uiLanguageLabel">Interface Language</label>
+                    <select id="ui-language-select" onchange="updateUIText(this.value)">
+                        <option value="TR">Turkce</option><option value="EN">English</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label>Volume: <span id="volume-value">5</span></label>
+                    <input type="range" id="volume-slider" min="0" max="30" value="5" style="width: 100%;" oninput="sendAction('set_volume', this.value)">
+                </div>
             </div>
-        </div>
-        <div class="card">
-            <h2>Device Status</h2>
-            <div class="status-item"><span>DFPlayer Sound Module</span><span class="status-dot offline" id="dfplayer-status"></span></div>
-            <div class="status-item"><span>WiFi Connection</span><span class="status-dot offline" id="wifi-status"></span></div>
         </div>
     </div>
 <script>
+    const langStrings = {
+        'TR': {
+            timerTitle: "Oyun Sayacı", controlPanelTitle: "Kontrol Paneli", gameStatusLabel: "Oyun Durumu",
+            levelDetailLabel: "Seviye Detayı", startButton: "OYUNU BAŞLAT", settingsTitle: "Ayarlar",
+            soundLanguageLabel: "Oyun Sesi Dili", uiLanguageLabel: "Arayüz Dili"
+        },
+        'EN': {
+            timerTitle: "Game Timer", controlPanelTitle: "Control Panel", gameStatusLabel: "Game Status",
+            levelDetailLabel: "Level Details", startButton: "START GAME", settingsTitle: "Settings",
+            soundLanguageLabel: "Game Sound Language", uiLanguageLabel: "Interface Language"
+        }
+    };
+
     var gateway = `ws://${window.location.hostname}/ws`;
     var websocket;
     window.addEventListener('load', () => { initWebSocket(); });
 
     function initWebSocket() {
-        console.log('Trying to open a WebSocket connection...');
         websocket = new WebSocket(gateway);
-        websocket.onopen  = (event) => { 
-            console.log('Connection opened'); 
-            document.getElementById('game-state').innerText = "Connected";
-        };
-        websocket.onclose = (event) => { 
-            console.log('Connection closed'); 
-            updateStatusDot('wifi-status', false);
-            document.getElementById('game-state').innerText = "Connection Lost. Retrying...";
-            setTimeout(initWebSocket, 2000); 
-        };
-        websocket.onmessage = (event) => {
-            let data = JSON.parse(event.data);
-            console.log(data);
+        websocket.onopen  = onOpen;
+        websocket.onclose = onClose;
+        websocket.onmessage = onMessage;
+    }
 
-            if(data.gameState) document.getElementById('game-state').innerText = data.gameState;
-            if(data.levelDetail) document.getElementById('level-detail').innerText = data.levelDetail;
-            if(data.matrix) document.getElementById('matrix-display').innerText = data.matrix || "--";
-            
-            updateStatusDot('dfplayer-status', data.dfPlayerStatus);
-            updateStatusDot('wifi-status', data.wifiStatus);
+    function onOpen(event) {
+        console.log('Connection opened');
+    }
 
-            if(data.hasOwnProperty('volume')) {
-                document.getElementById('volume-slider').value = data.volume;
-                document.getElementById('volume-value').innerText = data.volume;
-            }
-            if(data.hasOwnProperty('language')) { 
-                document.getElementById('language-select').value = data.language; 
-            }
-            
-            document.getElementById('startButton').disabled = (data.gameState !== "Oyunu Baslat");
-        };
+    function onClose(event) { 
+        console.log('Connection closed');
+        document.getElementById('game-state').innerText = "Connection Lost. Retrying...";
+        setTimeout(initWebSocket, 2000); 
+    }
+
+    function formatTime(seconds) {
+        if (seconds < 0) seconds = 0;
+        const min = Math.floor(seconds / 60).toString().padStart(2, '0');
+        const sec = (seconds % 60).toString().padStart(2, '0');
+        return `${min}:${sec}`;
+    }
+
+    function updateUIText(lang) {
+        const dict = langStrings[lang] || langStrings['EN'];
+        document.querySelectorAll('[data-lang-key]').forEach(elem => {
+            const key = elem.getAttribute('data-lang-key');
+            if(dict[key]) elem.innerText = dict[key];
+        });
+        document.getElementById('ui-language-select').value = lang;
+    }
+
+    function onMessage(event) {
+        let data = JSON.parse(event.data);
+        
+        if(data.gameState) document.getElementById('game-state').innerText = data.gameState;
+        if(data.levelDetail) document.getElementById('level-detail').innerText = data.levelDetail;
+        
+        if(data.hasOwnProperty('timer')) {
+            document.getElementById('timer-display').innerText = formatTime(data.timer);
+        }
+
+        if(data.hasOwnProperty('volume')) {
+            document.getElementById('volume-slider').value = data.volume;
+            document.getElementById('volume-value').innerText = data.volume;
+        }
+        
+        if(data.hasOwnProperty('soundLanguage')) { 
+            document.getElementById('sound-language-select').value = data.soundLanguage; 
+        }
+        
+        document.getElementById('startButton').disabled = (data.gameState !== "Oyunu Baslat");
     }
     
-    function updateStatusDot(id, status) {
-        const dot = document.getElementById(id);
-        if(dot) dot.className = 'status-dot ' + (status ? 'online' : 'offline');
-    }
-
     function sendAction(action, value = null) {
-        if (websocket.readyState !== WebSocket.OPEN) {
-            console.log("WebSocket is not connected.");
-            return;
-        }
+        if (websocket.readyState !== WebSocket.OPEN) return;
         let command = {'action': action};
         if (value !== null) {
             command.value = !isNaN(parseInt(value)) ? parseInt(value) : value;
         }
-        console.log("Sending: ", command);
         websocket.send(JSON.stringify(command));
-
+        
         if(action === 'set_volume') {
             document.getElementById('volume-value').innerText = value;
         }
