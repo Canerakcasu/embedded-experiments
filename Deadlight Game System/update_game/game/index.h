@@ -1,109 +1,107 @@
-// Bu dosyanın adı: index.h
-
 const char index_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE html>
-<html lang="tr">
+<!DOCTYPE HTML><html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP32 Oyun Kontrol Paneli</title>
-    <style>
-        :root {
-            --bg-color: #121212; --card-color: #1E1E1E; --primary-color: #03DAC6;
-            --accent-color: #BB86FC; --text-color: #E0E0E0; --danger-color: #CF6679;
-            --font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        }
-        body { background-color: var(--bg-color); color: var(--text-color); font-family: var(--font-family); margin: 0; padding: 20px; }
-        .container { max-width: 1200px; margin: auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
-        .card { background-color: var(--card-color); border-radius: 12px; padding: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
-        h2 { margin-top: 0; color: var(--primary-color); border-bottom: 1px solid #333; padding-bottom: 10px; }
-        .status-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #333; }
-        .status-item:last-child { border-bottom: none; }
-        .status-dot { width: 14px; height: 14px; border-radius: 50%; }
-        .online { background-color: #32ff7e; box-shadow: 0 0 8px #32ff7e; }
-        .offline { background-color: #777; }
-        .game-status-display {
-            background-color: rgba(0,0,0,0.3); padding: 15px; border-radius: 8px; text-align: center;
-            font-size: 1.1em; font-weight: bold; margin-bottom: 15px; color: var(--accent-color); min-height: 25px; word-wrap: break-word; font-family: 'Courier New', Courier, monospace;
-        }
-        .button-group { display: flex; gap: 10px; }
-        label { display: block; margin-bottom: 8px; font-weight: bold; }
-        select, button {
-            width: 100%; padding: 12px; border-radius: 5px; border: none; background-color: var(--primary-color);
-            color: #121212; font-weight: bold; font-size: 1em; cursor: pointer; margin-top: 10px; transition: background-color 0.2s;
-        }
-        button:hover { filter: brightness(1.2); }
-        .btn-danger { background-color: var(--danger-color); color: white; }
-    </style>
+  <title>Deadlight Game Kontrol Paneli</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: Arial, sans-serif; background-color: #121212; color: #e0e0e0; text-align: center; }
+    .container { max-width: 600px; margin: auto; padding: 20px; }
+    h2 { color: #bb86fc; }
+    .card { background: #1e1e1e; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 8px rgba(0,0,0,0.3); }
+    .status-display { font-size: 1.5em; font-weight: bold; color: #03dac6; margin: 10px 0; }
+    .matrix-display { font-family: 'Courier New', Courier, monospace; background: #000; color: #f00; padding: 15px; border-radius: 4px; font-size: 2em; letter-spacing: 5px; margin-bottom: 20px; }
+    button { background-color: #bb86fc; color: #121212; border: none; padding: 15px 30px; font-size: 1em; border-radius: 5px; cursor: pointer; transition: background-color 0.3s; }
+    button:hover { background-color: #3700b3; color: #fff; }
+    .control-group { margin: 15px 0; }
+    label { margin-right: 10px; }
+    select, input[type=range] { padding: 8px; border-radius: 4px; background: #333; color: #e0e0e0; border: 1px solid #444; }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <div class="card">
-            <h2>Kontrol Paneli</h2>
-            <div class="game-status-display" id="game-state">Bağlantı Kuruluyor...</div>
-            <label>Oyun Aşaması</label>
-            <div class="game-status-display" id="level-detail">--</div>
-            <div class="button-group">
-                <button onclick="sendCommand('start')">OYUNU BAŞLAT</button>
-                <button class="btn-danger" onclick="sendCommand('reset')">SİSTEMİ RESETLE</button>
-            </div>
-        </div>
-        <div class="card">
-            <h2>Canlı Takip</h2>
-            <label>Matris Ekranı</label>
-            <div class="game-status-display" id="matrix-display">--</div>
-        </div>
-        <div class="card">
-            <h2>Ayarlar</h2>
-            <div class="control-group">
-                <label for="language-select">Oyun Dili</label>
-                <select id="language-select" onchange="sendSetting('setLanguage', this.value)">
-                    <option value="TR">Türkçe</option><option value="EN">İngilizce</option>
-                </select>
-            </div>
-            <div class="control-group">
-                <label>Ses Seviyesi: <span id="volume-value">5</span></label>
-                <input type="range" id="volume-slider" min="0" max="30" value="5" oninput="sendSetting('setVolume', this.value)">
-            </div>
-        </div>
-        <div class="card">
-            <h2>Cihaz Durumları</h2>
-            <div class="status-item"><span>DFPlayer Ses Modülü</span><span class="status-dot offline" id="dfplayer-status"></span></div>
-            <div class="status-item"><span>WiFi Bağlantısı</span><span class="status-dot offline" id="wifi-status"></span></div>
-        </div>
+  <div class="container">
+    <h2>Deadlight Kontrol Paneli</h2>
+    
+    <div class="card">
+      <h4>Oyun Durumu</h4>
+      <div id="gameState" class="status-display">Bağlanıyor...</div>
+      <h4>Matris Ekran</h4>
+      <div id="matrix" class="matrix-display">-</div>
     </div>
+
+    <div class="card">
+      <button id="startButton" onclick="startGame()">Oyunu Başlat</button>
+      <div class="control-group">
+        <label for="volume">Ses Seviyesi:</label>
+        <input type="range" id="volume" min="0" max="30" onchange="setVolume(this.value)">
+      </div>
+      <div class="control-group">
+        <label for="language">Oyun Dili:</label>
+        <select id="language" onchange="setLanguage(this.value)">
+          <option value="TR">Turkish</option>
+          <option value="EN">English</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
 <script>
-    var gateway = `ws://${window.location.hostname}/ws`;
-    var websocket;
-    window.addEventListener('load', () => { initWebSocket(); });
-    function initWebSocket() {
-        websocket = new WebSocket(gateway);
-        websocket.onopen  = (event) => { console.log('Bağlantı açıldı'); };
-        websocket.onclose = (event) => { setTimeout(initWebSocket, 2000); };
-        websocket.onmessage = (event) => {
-            let data = JSON.parse(event.data);
-            if(data.gameState) document.getElementById('game-state').innerText = data.gameState;
-            if(data.levelDetail) document.getElementById('level-detail').innerText = data.levelDetail;
-            if(data.matrix) document.getElementById('matrix-display').innerText = data.matrix;
-            updateStatusDot('dfplayer-status', data.dfplayer);
-            updateStatusDot('wifi-status', data.wifi);
-            if(data.hasOwnProperty('volume')) {
-                document.getElementById('volume-slider').value = data.volume;
-                document.getElementById('volume-value').innerText = data.volume;
-            }
-            if(data.hasOwnProperty('language')) { document.getElementById('language-select').value = data.language; }
-        };
+  var gateway = `ws://${window.location.hostname}/ws`;
+  var websocket;
+  window.addEventListener('load', onload);
+
+  function onload(event) {
+    initWebSocket();
+  }
+
+  function initWebSocket() {
+    console.log('Trying to open a WebSocket connection...');
+    websocket = new WebSocket(gateway);
+    websocket.onopen    = onOpen;
+    websocket.onclose   = onClose;
+    websocket.onmessage = onMessage;
+  }
+
+  function onOpen(event) {
+    console.log('Connection opened');
+  }
+
+  function onClose(event) {
+    console.log('Connection closed');
+    setTimeout(initWebSocket, 2000);
+  }
+
+  function onMessage(event) {
+    console.log(event.data);
+    var data = JSON.parse(event.data);
+    document.getElementById('gameState').innerText = data.gameState;
+    document.getElementById('matrix').innerText = data.matrix || "-";
+    document.getElementById('volume').value = data.volume;
+    document.getElementById('language').value = data.language;
+    
+    // "Oyunu BaSlat" butonunu sadece bekleme durumunda aktif et
+    if (data.gameState === "START") {
+      document.getElementById('startButton').disabled = false;
+    } else {
+      document.getElementById('startButton').disabled = true;
     }
-    function updateStatusDot(id, status) {
-        const dot = document.getElementById(id);
-        dot.className = 'status-dot ' + (status ? 'online' : 'offline');
-    }
-    function sendCommand(command) { websocket.send(JSON.stringify({'action': command})); }
-    function sendSetting(setting, value) {
-        let val = isNaN(parseInt(value)) ? value : parseInt(value);
-        websocket.send(JSON.stringify({'action': setting, 'value': val}));
-        if(setting === 'setVolume') document.getElementById('volume-value').innerText = value;
-    }
+  }
+
+  function sendCommand(json) {
+    console.log("Sending: " + json);
+    websocket.send(json);
+  }
+
+  function startGame() {
+    sendCommand('{"command":"startGame"}');
+  }
+
+  function setVolume(value) {
+    sendCommand(`{"command":"setVolume", "value":${value}}`);
+  }
+
+  function setLanguage(value) {
+    sendCommand(`{"command":"setLanguage", "value":"${value}"}`);
+  }
 </script>
 </body>
 </html>
