@@ -63,6 +63,7 @@ const char* gameStateNames[] = {
 
 // --- OYUN DEĞİŞKENLERİ ---
 unsigned long stateTimer = 0; int step1Level = 0; int step2Level = 0;
+unsigned long step1NextSpotTime = 0; // EKLENMESİ GEREKEN SATIR
 bool button_s2_state[4] = {false, false, false, false};
 bool dfPlayerStatus = false; int gameVolume = 5;
 char matrixBuffer[20] = "START";
@@ -134,7 +135,7 @@ void loop() {
     case STEP1_COMPLETE:
       Serial.println("[DURUM] Adim 1 Tamamlandi.");
       playSound(SOUND_S1_END); showOnMatrix("DEAD");
-      fill_solid(leds, NUM_LEDS, CRGB::Black); FastLED.show();
+      fill_solid(leds, NUM_LEDS, CRGB::GREEN); FastLED.show();
       stateTimer = millis(); currentState = WAITING_FOR_STEP2;
       break;
     case WAITING_FOR_STEP2: {
@@ -177,7 +178,7 @@ void loop() {
       static unsigned long lastBlink = 0;
       if(millis() - lastBlink > 100) {
           lastBlink = millis(); static bool on = false; on = !on;
-          if(on) { fill_solid(leds,NUM_LEDS,CRGB::Green); } else { fill_solid(leds,NUM_LEDS,CRGB::Black); }
+          if(on) { fill_solid(leds,NUM_LEDS,CRGB::Green); } else { fill_solid(leds,NUM_LEDS,CRGB::RED); }
           FastLED.show();
       }
     }
@@ -219,6 +220,5 @@ void handleStep1() {
   }
 }
 
-// ======================= WEB VE DİĞER FONKSİYONLAR =========================
 void onEvent(AsyncWebSocket*, AsyncWebSocketClient*, AwsEventType, void*, uint8_t*, size_t) { /* ... */ }
 void notifyClients() { /* ... */ }
