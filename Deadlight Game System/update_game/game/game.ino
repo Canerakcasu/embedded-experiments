@@ -1,8 +1,8 @@
 /**
  * @file game.ino
  * @brief Deadlight Game System - Interactive Escape Room Prop with WebSocket and MQTT control.
- * @version 3.2 - Final
- * @date 11 Haziran 2025
+ * @version 4.0 - Final Polished
+ * @date 11 June 2025
  */
 
 //--- LIBRARIES ---
@@ -21,7 +21,7 @@
 //--- NETWORK & MQTT CONFIGURATION ---
 const char* wifi_ssid = "Ents_Test";
 const char* wifi_password = "12345678";
-const char* mqtt_server = "192.168.20.208"; // CHANGE TO YOUR MQTT BROKER IP
+const char* mqtt_server = "192.168.20.208"; // DEĞİŞTİR: Kendi MQTT Sunucu IP Adresiniz
 const int   mqtt_port = 1883;
 const char* command_topic = "game/control";
 const char* status_topic = "game/status";
@@ -116,7 +116,7 @@ void setup() {
   Serial.begin(115200);
   randomSeed(analogRead(0));
 
-  FastLED.addLeds<WS2811, LED_PIN, GRB>(leds, NUM_PIXELS);
+  FastLED.addLeds<WS2811, LED_PIN, BRG>(leds, NUM_PIXELS);
   FastLED.setBrightness(BRIGHTNESS);
   fill_solid(leds, NUM_PIXELS, CRGB::Black);
   FastLED.show();
@@ -161,7 +161,9 @@ void loop() {
     case STEP1_INIT:
       step1Level = 0; showOnMatrix(""); resetStep1Round(); currentState = STEP1_PLAYING;
       break;
-    case STEP1_PLAYING: handleStep1(); break;
+    case STEP1_PLAYING:
+      handleStep1();
+      break;
     case STEP1_COMPLETE:
       playSound(SOUND_S1_END); showOnMatrix("DEAD"); fill_solid(leds, NUM_PIXELS, CRGB::Black); FastLED.show();
       stateTimer = millis(); currentState = WAITING_FOR_STEP2;
@@ -226,7 +228,6 @@ void playSound(uint8_t track) {
   uint8_t folder = (currentGameLanguage == LANG_TR) ? 1 : 2;
   if (dfPlayerStatus) myDFPlayer.playFolder(folder, track);
 }
-
 void showOnMatrix(const char* text) {
   strcpy(matrixBuffer, text);
   P.displayClear();
@@ -283,7 +284,8 @@ void resetStep1Round() {
   
   ledProgress = -CHUNK_SIZE; currentStep = 0; alertIsActive = false;
   int totalStepsInLoop = NUM_PIXELS / CHUNK_SIZE;
-  targetStep = random(4, totalStepsInLoop - 2); 
+  // --- DEĞİŞİKLİK: Kırmızı ışığın daha geç çıkması için alt limit artırıldı. ---
+  targetStep = random(8, totalStepsInLoop - 2); 
   
   fill_solid(leds, NUM_PIXELS, CRGB::Black);
   FastLED.show();
