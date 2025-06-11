@@ -1,107 +1,145 @@
+// Bu dosyanın adı: index.h
+
 const char index_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE HTML><html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-  <title>Deadlight Game Kontrol Paneli</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    body { font-family: Arial, sans-serif; background-color: #121212; color: #e0e0e0; text-align: center; }
-    .container { max-width: 600px; margin: auto; padding: 20px; }
-    h2 { color: #bb86fc; }
-    .card { background: #1e1e1e; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 8px rgba(0,0,0,0.3); }
-    .status-display { font-size: 1.5em; font-weight: bold; color: #03dac6; margin: 10px 0; }
-    .matrix-display { font-family: 'Courier New', Courier, monospace; background: #000; color: #f00; padding: 15px; border-radius: 4px; font-size: 2em; letter-spacing: 5px; margin-bottom: 20px; }
-    button { background-color: #bb86fc; color: #121212; border: none; padding: 15px 30px; font-size: 1em; border-radius: 5px; cursor: pointer; transition: background-color 0.3s; }
-    button:hover { background-color: #3700b3; color: #fff; }
-    .control-group { margin: 15px 0; }
-    label { margin-right: 10px; }
-    select, input[type=range] { padding: 8px; border-radius: 4px; background: #333; color: #e0e0e0; border: 1px solid #444; }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Game Control Panel</title>
+    <style>
+        :root {
+            --bg-color: #121212; --card-color: #1E1E1E; --primary-color: #03DAC6;
+            --accent-color: #BB86FC; --text-color: #E0E0E0; --danger-color: #CF6679;
+            --font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        body { background-color: var(--bg-color); color: var(--text-color); font-family: var(--font-family); margin: 0; padding: 20px; }
+        .container { max-width: 1200px; margin: auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
+        .card { background-color: var(--card-color); border-radius: 12px; padding: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+        h2 { margin-top: 0; color: var(--primary-color); border-bottom: 1px solid #333; padding-bottom: 10px; }
+        .status-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #333; }
+        .status-item:last-child { border-bottom: none; }
+        .status-dot { width: 14px; height: 14px; border-radius: 50%; transition: all 0.3s; }
+        .online { background-color: #32ff7e; box-shadow: 0 0 8px #32ff7e; }
+        .offline { background-color: #777; }
+        .display {
+            background-color: rgba(0,0,0,0.3); padding: 15px; border-radius: 8px; text-align: center;
+            font-size: 1.1em; font-weight: bold; margin-bottom: 15px; color: var(--accent-color); min-height: 25px; 
+            word-wrap: break-word; font-family: 'Courier New', Courier, monospace;
+        }
+        .button-group { display: flex; gap: 10px; }
+        label { display: block; margin-bottom: 8px; font-weight: bold; color: var(--primary-color); }
+        select, button, input[type=range] {
+            width: 100%; padding: 12px; border-radius: 5px; border: none; font-size: 1em; cursor: pointer;
+            margin-top: 10px; transition: background-color 0.2s, filter 0.2s; box-sizing: border-box;
+        }
+        button { background-color: var(--accent-color); color: #121212; font-weight: bold; }
+        button:hover:not(:disabled) { filter: brightness(1.2); }
+        button:disabled { background-color: #444; color: #777; cursor: not-allowed; }
+        select { background-color: #333; color: var(--text-color); }
+        .btn-danger { background-color: var(--danger-color); color: white; }
+        .control-group { margin-top: 20px; }
+    </style>
 </head>
 <body>
-  <div class="container">
-    <h2>Deadlight Kontrol Paneli</h2>
-    
-    <div class="card">
-      <h4>Oyun Durumu</h4>
-      <div id="gameState" class="status-display">Bağlanıyor...</div>
-      <h4>Matris Ekran</h4>
-      <div id="matrix" class="matrix-display">-</div>
+    <div class="container">
+        <div class="card">
+            <h2>Control Panel</h2>
+            <label>Game Status</label>
+            <div class="display" id="game-state">Connecting...</div>
+            <label>Level Details</label>
+            <div class="display" id="level-detail">--</div>
+            <div class="button-group">
+                <button id="startButton" onclick="sendAction('start_game')">START GAME</button>
+                <button class="btn-danger" onclick="sendAction('reset_game')">RESET SYSTEM</button>
+            </div>
+        </div>
+        <div class="card">
+            <h2>Live Monitor</h2>
+            <label>Matrix Display</label>
+            <div class="display" id="matrix-display">--</div>
+        </div>
+        <div class="card">
+            <h2>Settings</h2>
+            <div class="control-group">
+                <label for="language-select">Game Language</label>
+                <select id="language-select" onchange="sendAction('set_language', this.value)">
+                    <option value="TR">Turkce</option><option value="EN">English</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label>Volume: <span id="volume-value">5</span></label>
+                <input type="range" id="volume-slider" min="0" max="30" value="5" style="width: 100%;" oninput="sendAction('set_volume', this.value)">
+            </div>
+        </div>
+        <div class="card">
+            <h2>Device Status</h2>
+            <div class="status-item"><span>DFPlayer Sound Module</span><span class="status-dot offline" id="dfplayer-status"></span></div>
+            <div class="status-item"><span>WiFi Connection</span><span class="status-dot offline" id="wifi-status"></span></div>
+        </div>
     </div>
-
-    <div class="card">
-      <button id="startButton" onclick="startGame()">Oyunu Başlat</button>
-      <div class="control-group">
-        <label for="volume">Ses Seviyesi:</label>
-        <input type="range" id="volume" min="0" max="30" onchange="setVolume(this.value)">
-      </div>
-      <div class="control-group">
-        <label for="language">Oyun Dili:</label>
-        <select id="language" onchange="setLanguage(this.value)">
-          <option value="TR">Turkish</option>
-          <option value="EN">English</option>
-        </select>
-      </div>
-    </div>
-  </div>
-
 <script>
-  var gateway = `ws://${window.location.hostname}/ws`;
-  var websocket;
-  window.addEventListener('load', onload);
+    var gateway = `ws://${window.location.hostname}/ws`;
+    var websocket;
+    window.addEventListener('load', () => { initWebSocket(); });
 
-  function onload(event) {
-    initWebSocket();
-  }
+    function initWebSocket() {
+        console.log('Trying to open a WebSocket connection...');
+        websocket = new WebSocket(gateway);
+        websocket.onopen  = (event) => { 
+            console.log('Connection opened'); 
+            document.getElementById('game-state').innerText = "Connected";
+        };
+        websocket.onclose = (event) => { 
+            console.log('Connection closed'); 
+            updateStatusDot('wifi-status', false);
+            document.getElementById('game-state').innerText = "Connection Lost. Retrying...";
+            setTimeout(initWebSocket, 2000); 
+        };
+        websocket.onmessage = (event) => {
+            let data = JSON.parse(event.data);
+            console.log(data);
 
-  function initWebSocket() {
-    console.log('Trying to open a WebSocket connection...');
-    websocket = new WebSocket(gateway);
-    websocket.onopen    = onOpen;
-    websocket.onclose   = onClose;
-    websocket.onmessage = onMessage;
-  }
+            if(data.gameState) document.getElementById('game-state').innerText = data.gameState;
+            if(data.levelDetail) document.getElementById('level-detail').innerText = data.levelDetail;
+            if(data.matrix) document.getElementById('matrix-display').innerText = data.matrix || "--";
+            
+            updateStatusDot('dfplayer-status', data.dfPlayerStatus);
+            updateStatusDot('wifi-status', data.wifiStatus);
 
-  function onOpen(event) {
-    console.log('Connection opened');
-  }
-
-  function onClose(event) {
-    console.log('Connection closed');
-    setTimeout(initWebSocket, 2000);
-  }
-
-  function onMessage(event) {
-    console.log(event.data);
-    var data = JSON.parse(event.data);
-    document.getElementById('gameState').innerText = data.gameState;
-    document.getElementById('matrix').innerText = data.matrix || "-";
-    document.getElementById('volume').value = data.volume;
-    document.getElementById('language').value = data.language;
-    
-    // "Oyunu BaSlat" butonunu sadece bekleme durumunda aktif et
-    if (data.gameState === "START") {
-      document.getElementById('startButton').disabled = false;
-    } else {
-      document.getElementById('startButton').disabled = true;
+            if(data.hasOwnProperty('volume')) {
+                document.getElementById('volume-slider').value = data.volume;
+                document.getElementById('volume-value').innerText = data.volume;
+            }
+            if(data.hasOwnProperty('language')) { 
+                document.getElementById('language-select').value = data.language; 
+            }
+            
+            document.getElementById('startButton').disabled = (data.gameState !== "Oyunu Baslat");
+        };
     }
-  }
+    
+    function updateStatusDot(id, status) {
+        const dot = document.getElementById(id);
+        if(dot) dot.className = 'status-dot ' + (status ? 'online' : 'offline');
+    }
 
-  function sendCommand(json) {
-    console.log("Sending: " + json);
-    websocket.send(json);
-  }
+    function sendAction(action, value = null) {
+        if (websocket.readyState !== WebSocket.OPEN) {
+            console.log("WebSocket is not connected.");
+            return;
+        }
+        let command = {'action': action};
+        if (value !== null) {
+            command.value = !isNaN(parseInt(value)) ? parseInt(value) : value;
+        }
+        console.log("Sending: ", command);
+        websocket.send(JSON.stringify(command));
 
-  function startGame() {
-    sendCommand('{"command":"startGame"}');
-  }
-
-  function setVolume(value) {
-    sendCommand(`{"command":"setVolume", "value":${value}}`);
-  }
-
-  function setLanguage(value) {
-    sendCommand(`{"command":"setLanguage", "value":"${value}"}`);
-  }
+        if(action === 'set_volume') {
+            document.getElementById('volume-value').innerText = value;
+        }
+    }
 </script>
 </body>
 </html>

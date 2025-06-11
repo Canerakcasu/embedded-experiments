@@ -1,4 +1,12 @@
+// Projenin tam hali buraya eklenecek... (Yukarıdaki mantığı içeren tam kod)
+/**
+ * @file game.ino
+ * @brief Deadlight Game System - Etkileşimli Kaçış Oyunu Projesi
+ * @version 2.4 - Akıcı Oyun Mekaniği
+ * @date 11 Haziran 2025
+ */
 
+//--- KÜTÜPHANELER ---
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
@@ -23,7 +31,6 @@
 #define DFPLAYER_TX_PIN      17
 
 //--- DONANIM ve OYUN AYARLARI ---
-// 69 fiziksel LED = 23 Piksel.
 #define NUM_PIXELS           23
 #define BRIGHTNESS           80
 #define MATRIX_HARDWARE_TYPE MD_MAX72XX::FC16_HW
@@ -35,7 +42,7 @@
 #define SUCCESS_COLOR        CRGB::LawnGreen
 #define FAIL_COLOR           CRGB::DarkOrange
 #define ANIMATION_INTERVAL   250
-#define REACTION_WINDOW      1500
+#define REACTION_WINDOW      500  // Kırmızının görünür kalma süresi (ms)
 #define RESULT_SHOW_TIME     2000
 #define CHUNK_SIZE           1
 
@@ -51,8 +58,6 @@ const uint8_t SOUND_S2_ERROR     = 5;
 // Oyun Ayarları
 const char STEP1_TARGET_WORD[] = "DEAD";
 const char* STEP2_LEVELS[] = {"OXOX", "XOOX", "XXXO", "OOOX"};
-
-// Dil Ayarları
 enum GameLanguage { LANG_TR, LANG_EN };
 GameLanguage currentGameLanguage = LANG_TR;
 
@@ -74,10 +79,8 @@ const char* gameStateNames[] = {
   "Oyunu Baslat", "Adim 1 Oynaniyor", "Adim 1 Oynaniyor", "Adim 1 Bitti",
   "Adim 2'yi Bekliyor", "Adim 2 Basliyor", "Adim 2 Oynaniyor", "OYUN KAZANILDI"
 };
-
-// Adım 1'in Kendi İç Durumları
-enum Step1Phase { S1_ANIMATING, S1_WAITING_FOR_PRESS, S1_SHOWING_SUCCESS, S1_SHOWING_FAILURE };
-Step1Phase currentStep1Phase = S1_ANIMATING;
+enum Step1Phase { S1_PLAYING, S1_SHOWING_SUCCESS, S1_SHOWING_FAILURE };
+Step1Phase currentStep1Phase = S1_PLAYING;
 
 // Genel Oyun Değişkenleri
 unsigned long stateTimer = 0;
@@ -85,6 +88,7 @@ int step1Level = 0;
 int step2Level = 0;
 bool button_s2_state[4] = {false, false, false, false};
 bool dfPlayerStatus = false;
+bool wifiStatus = false;
 int gameVolume = 5;
 char matrixBuffer[20] = "START";
 
@@ -92,6 +96,8 @@ char matrixBuffer[20] = "START";
 int ledProgress = 0;
 int currentStep = 0;
 int targetStep = 0;
+bool alertIsActive = false;
+unsigned long alertTimer = 0;
 
 //--- YARDIMCI FONKSİYONLAR (Prototipler) ---
 void playSound(uint8_t track);
@@ -118,50 +124,43 @@ void showOnMatrix(const char* text) {
 void setup() {
   Serial.begin(115200);
   randomSeed(analogRead(0));
-
   FastLED.addLeds<WS2811, LED_PIN, GRB>(leds, NUM_PIXELS);
   FastLED.setBrightness(BRIGHTNESS);
   fill_solid(leds, NUM_PIXELS, CRGB::Black);
   FastLED.show();
-
   P.begin();
   P.setIntensity(4);
-
   mp3Serial.begin(9600, SERIAL_8N1, DFPLAYER_RX_PIN, DFPLAYER_TX_PIN);
   if (myDFPlayer.begin(mp3Serial)) {
     myDFPlayer.volume(gameVolume);
     dfPlayerStatus = true;
     Serial.println("[OK] DFPlayer Mini online.");
   } else {
+    dfPlayerStatus = false;
     Serial.println("[HATA] DFPlayer Mini bulunamadi!");
   }
-
   pinMode(BUTTON_1, INPUT_PULLUP);
   pinMode(BUTTON_2, INPUT_PULLUP);
   pinMode(BUTTON_3, INPUT_PULLUP);
   pinMode(BUTTON_4, INPUT_PULLUP);
-
   Serial.println("\nWiFi agina baglaniliyor...");
   WiFi.begin("Ents_Test", "12345678");
   int wifi_retries = 0;
-  while (WiFi.status() != WL_CONNECTED && wifi_retries < 30) {
-    delay(500);
-    Serial.print(".");
-    wifi_retries++;
+  while (WiFi.status() != WL_CONNECTED && wifi_retries < 20) {
+    delay(500); Serial.print("."); wifi_retries++;
   }
   if (WiFi.status() == WL_CONNECTED) {
+    wifiStatus = true;
     Serial.println("\nWiFi baglantisi basarili!");
-    Serial.print("IP Adresi: ");
-    Serial.println(WiFi.localIP());
+    Serial.print("IP Adresi: "); Serial.println(WiFi.localIP());
   } else {
-    Serial.println("\nWiFi baglantisi basarisiz! WiFi olmadan devam ediliyor...");
+    wifiStatus = false;
+    Serial.println("\nWiFi baglantisi basarisiz!");
   }
-  
   ws.onEvent(onEvent);
   server.addHandler(&ws);
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){ request->send_P(200, "text/html", index_html); });
   server.begin();
-  
   showOnMatrix(matrixBuffer);
 }
 
@@ -171,12 +170,10 @@ void loop() {
     P.displayReset();
   }
   ws.cleanupClients();
-
   switch (currentState) {
     case WAITING_TO_START:
       if (digitalRead(BUTTON_1) == LOW) { playSound(SOUND_S1_WELCOME); currentState = STEP1_INIT; delay(200); }
       break;
-
     case STEP1_INIT:
       Serial.println("\n[DURUM] Adim 1 Basliyor: Reaksiyon oyunu kuruluyor.");
       step1Level = 0;
@@ -184,11 +181,9 @@ void loop() {
       resetStep1Round();
       currentState = STEP1_PLAYING;
       break;
-
     case STEP1_PLAYING:
       handleStep1();
       break;
-
     case STEP1_COMPLETE:
       Serial.println("[DURUM] Adim 1 Tamamlandi.");
       playSound(SOUND_S1_END);
@@ -198,7 +193,6 @@ void loop() {
       stateTimer = millis();
       currentState = WAITING_FOR_STEP2;
       break;
-
     case WAITING_FOR_STEP2: {
       static bool promptPlayed = false;
       if (millis() - stateTimer > 4000 && !promptPlayed) {
@@ -209,14 +203,12 @@ void loop() {
       }
     }
       break;
-
     case STEP2_INIT:
       showOnMatrix(STEP2_LEVELS[step2Level]);
       stateTimer = millis();
       for(int i=0; i<4; i++) button_s2_state[i] = false;
       currentState = STEP2_PLAYING;
       break;
-
     case STEP2_PLAYING: {
       static char lastDisplayS2[5] = "";
       if (millis() - stateTimer > 1000) {
@@ -226,7 +218,6 @@ void loop() {
         if (digitalRead(BUTTON_3) == LOW) button_s2_state[2] = true;
         if (digitalRead(BUTTON_4) == LOW) button_s2_state[3] = true;
         for (int i = 0; i < 4; i++) { if (button_s2_state[i]) display[i] = 'X'; }
-        
         if (strcmp(display, lastDisplayS2) != 0) {
           showOnMatrix(display);
           strcpy(lastDisplayS2, display);
@@ -253,7 +244,6 @@ void loop() {
       }
     }
       break;
-
     case GAME_WON: {
       static bool finalActionDone = false;
       if (!finalActionDone) { playSound(SOUND_S2_SUCCESS); showOnMatrix("FINISH"); finalActionDone = true; }
@@ -266,7 +256,6 @@ void loop() {
     }
       break;
   }
-
   static unsigned long lastNotify = 0;
   if (millis() - lastNotify > 500) {
    lastNotify = millis();
@@ -275,20 +264,33 @@ void loop() {
 }
 
 // ======================= OYUN MANTIK FONKSİYONLARI =========================
-
 void handleStep1() {
   switch (currentStep1Phase) {
-    case S1_ANIMATING:
+    case S1_PLAYING:
       if (digitalRead(BUTTON_1) == LOW) {
-        Serial.println("HATA: Erken basıldı!");
-        playSound(SOUND_S2_ERROR);
-        fill_solid(leds, NUM_PIXELS, FAIL_COLOR);
-        FastLED.show();
-        showOnMatrix("FAIL!");
-        stateTimer = millis();
-        currentStep1Phase = S1_SHOWING_FAILURE;
-        delay(200);
-        return;
+        if (alertIsActive && (millis() - alertTimer < REACTION_WINDOW)) {
+          step1Level++;
+          playSound(SOUND_S2_SUCCESS);
+          fill_solid(leds, NUM_PIXELS, SUCCESS_COLOR);
+          FastLED.show();
+          String pWord; 
+          for(int i=0; i<step1Level; i++) pWord += STEP1_TARGET_WORD[i];
+          showOnMatrix(pWord.c_str());
+          stateTimer = millis();
+          currentStep1Phase = S1_SHOWING_SUCCESS;
+          delay(200);
+          return;
+        } else {
+          Serial.println("HATA: Erken basıldı!");
+          playSound(SOUND_S2_ERROR);
+          fill_solid(leds, NUM_PIXELS, FAIL_COLOR);
+          FastLED.show();
+          showOnMatrix("FAIL!");
+          stateTimer = millis();
+          currentStep1Phase = S1_SHOWING_FAILURE;
+          delay(200);
+          return;
+        }
       }
 
       if (millis() - stateTimer > ANIMATION_INTERVAL) {
@@ -301,50 +303,35 @@ void handleStep1() {
           currentStep = 0; 
         }
         
-        if (currentStep == targetStep) {
-          fill_solid(leds, NUM_PIXELS, CRGB::Black);
-          for (int i = 0; i < CHUNK_SIZE; i++) {
-            if (ledProgress + i < NUM_PIXELS) leds[ledProgress + i] = ALERT_COLOR;
-          }
-          FastLED.show();
-          stateTimer = millis();
-          currentStep1Phase = S1_WAITING_FOR_PRESS;
-          Serial.println("--> KIRMIZI YANDI! BEKLENİYOR...");
-          return;
+        if (alertIsActive && (millis() - alertTimer >= REACTION_WINDOW)) {
+          alertIsActive = false;
+          Serial.println("--> Fırsat kaçtı, animasyon devam ediyor.");
         }
 
         fill_solid(leds, NUM_PIXELS, CRGB::Black);
+        
+        CRGB blockColor = PROGRESS_COLOR;
+        
+        if (currentStep == targetStep && !alertIsActive) {
+          alertIsActive = true;
+          alertTimer = millis();
+          Serial.println("--> KIRMIZI YANDI! Animasyon devam ediyor...");
+        }
+
+        if (alertIsActive) {
+          blockColor = ALERT_COLOR;
+        }
+
         for (int i = 0; i < CHUNK_SIZE; i++) {
-          if (ledProgress + i < NUM_PIXELS) leds[ledProgress + i] = PROGRESS_COLOR;
+          if (ledProgress + i < NUM_PIXELS) leds[ledProgress + i] = blockColor;
         }
         FastLED.show();
-      }
-      break;
-
-    case S1_WAITING_FOR_PRESS:
-      if (digitalRead(BUTTON_1) == LOW) {
-        step1Level++;
-        playSound(SOUND_S2_SUCCESS);
-        fill_solid(leds, NUM_PIXELS, SUCCESS_COLOR);
-        FastLED.show();
-        String pWord; 
-        for(int i=0; i<step1Level; i++) pWord += STEP1_TARGET_WORD[i];
-        showOnMatrix(pWord.c_str());
-        stateTimer = millis();
-        currentStep1Phase = S1_SHOWING_SUCCESS;
-      } 
-      else if (millis() - stateTimer > REACTION_WINDOW) {
-        playSound(SOUND_S2_ERROR);
-        fill_solid(leds, NUM_PIXELS, FAIL_COLOR);
-        FastLED.show();
-        showOnMatrix("FAIL!");
-        stateTimer = millis();
-        currentStep1Phase = S1_SHOWING_FAILURE;
       }
       break;
 
     case S1_SHOWING_SUCCESS:
       if (millis() - stateTimer > RESULT_SHOW_TIME) {
+        alertIsActive = false;
         if (step1Level >= 4) {
           currentState = STEP1_COMPLETE;
         } else {
@@ -355,6 +342,7 @@ void handleStep1() {
       
     case S1_SHOWING_FAILURE:
       if (millis() - stateTimer > RESULT_SHOW_TIME) {
+        alertIsActive = false;
         showOnMatrix("START");
         fill_solid(leds, NUM_PIXELS, CRGB::Black);
         FastLED.show();
@@ -367,29 +355,34 @@ void handleStep1() {
 void resetStep1Round() {
   ledProgress = -CHUNK_SIZE;
   currentStep = 0;
-
+  alertIsActive = false;
   int totalStepsInLoop = NUM_PIXELS / CHUNK_SIZE;
   targetStep = random(4, totalStepsInLoop - 2); 
-  
   Serial.printf("YENİ TUR: Toplam Adim: %d, Hedef Adim: %d\n", totalStepsInLoop, targetStep);
-  
   fill_solid(leds, NUM_PIXELS, CRGB::Black);
   FastLED.show();
-  currentStep1Phase = S1_ANIMATING;
+  currentStep1Phase = S1_PLAYING;
   stateTimer = millis();
 }
 
 // ======================= WEB SUNUCU FONKSİYONLARI =========================
 void notifyClients() {
   static JSONVar gameStateJson; 
-
   gameStateJson["gameState"] = gameStateNames[currentState];
-  gameStateJson["step1Level"] = step1Level;
-  gameStateJson["step2Level"] = step2Level;
+  char levelDetail[32];
+  if (currentState == STEP1_PLAYING || currentState == STEP1_INIT) {
+    sprintf(levelDetail, "Adim 1 - Harf %d / 4", step1Level + 1);
+  } else if (currentState == STEP2_PLAYING || currentState == STEP2_INIT) {
+    sprintf(levelDetail, "Adim 2 - Seviye %d / 4", step2Level + 1);
+  } else {
+    strcpy(levelDetail, "--");
+  }
+  gameStateJson["levelDetail"] = levelDetail;
   gameStateJson["matrix"] = String(matrixBuffer);
   gameStateJson["volume"] = gameVolume;
   gameStateJson["language"] = (currentGameLanguage == LANG_TR) ? "TR" : "EN";
-
+  gameStateJson["dfPlayerStatus"] = dfPlayerStatus;
+  gameStateJson["wifiStatus"] = wifiStatus;
   String jsonString = JSON.stringify(gameStateJson);
   ws.textAll(jsonString);
 }
@@ -397,41 +390,42 @@ void notifyClients() {
 void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
   switch (type) {
     case WS_EVT_CONNECT:
-      Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+      Serial.printf("WebSocket client #%u baglandi\n", client->id());
       notifyClients();
       break;
     case WS_EVT_DISCONNECT:
-      Serial.printf("WebSocket client #%u disconnected\n", client->id());
+      Serial.printf("WebSocket client #%u baglantisi koptu\n", client->id());
       break;
     case WS_EVT_DATA:
       if (len == 0) return;
       {
         JSONVar jsonData = JSON.parse((char*)data);
         if (JSON.typeof(jsonData) == "undefined") {
-          Serial.println("WebSocket Error: JSON parsing failed");
+          Serial.println("WebSocket Hatasi: JSON verisi islenemedi");
           return;
         }
-
-        if (jsonData.hasOwnProperty("command")) {
-          String command = (const char*)jsonData["command"];
-          Serial.printf("--> WebSocket Komutu Alındı: %s\n", command.c_str());
-
-          if (command == "startGame" && currentState == WAITING_TO_START) {
+        if (jsonData.hasOwnProperty("action")) {
+          String action = (const char*)jsonData["action"];
+          Serial.printf("--> Web Komutu Alındı: %s\n", action.c_str());
+          if (action == "start_game" && currentState == WAITING_TO_START) {
             playSound(SOUND_S1_WELCOME);
             currentState = STEP1_INIT;
           }
-          else if (command == "setVolume") {
+          else if (action == "reset_game") {
+            showOnMatrix("RESET");
+            delay(1000);
+            ESP.restart();
+          }
+          else if (action == "set_volume") {
             gameVolume = (int)jsonData["value"];
-            if (gameVolume < 0) gameVolume = 0;
-            if (gameVolume > 30) gameVolume = 30;
+            if (gameVolume < 0) gameVolume = 0; if (gameVolume > 30) gameVolume = 30;
             myDFPlayer.volume(gameVolume);
           }
-          else if (command == "setLanguage") {
+          else if (action == "set_language") {
             String lang = (const char*)jsonData["value"];
             currentGameLanguage = (lang == "TR") ? LANG_TR : LANG_EN;
             myDFPlayer.stop();
           }
-          
           notifyClients();
         }
       }
