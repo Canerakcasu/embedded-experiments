@@ -1,8 +1,7 @@
 /**
- * @file esp32_master_controller.ino
- * @brief Game Master ESP with Web UI and Final Multi-Point Calibration.
- * @version 12.0 - Calibrated
- * @date 12 June 2025
+ * @file esp32_master_controller_final_complete.ino
+ * @brief Final version with all features, logic, and functions included for compilation.
+ * @version 16.0 - Final Master
  */
 
 //--- KÜTÜPHANELER ---
@@ -16,20 +15,10 @@
 #include <MFRC522.h>
 #include <Adafruit_NeoPixel.h>
 #include <AccelStepper.h>
-#include "index_h.h" // Web arayüzünü içeren dosya (değişiklik yok)
+#include "index_h.h"
 
 // ====================================================================================================
-//                                      KALİBRASYON VERİLERİ
-// ====================================================================================================
-// <<< SİZİN VERİLERİNİZ BURAYA GİRİLDİ >>>
-// Voltaj değerleri * 100 olarak yazılmıştır (örn: 2.0V -> 200)
-int calibrated_voltage_points[] = {  0, 200, 400, 600, 700, 800, 1000 };
-int calibrated_pwm_points[]     = {  0,  27,  31,  37,  65, 117,  220 }; // Not: 220, 10V için bir tahmindir.
-int calibration_points_count = sizeof(calibrated_voltage_points) / sizeof(int);
-
-
-// ====================================================================================================
-//                                      TÜM TANIMLAMALAR
+//                                      TANIMLAMALAR VE AYARLAR
 // ====================================================================================================
 
 // --- Donanım Pinleri ---
@@ -42,7 +31,7 @@ int calibration_points_count = sizeof(calibrated_voltage_points) / sizeof(int);
 #define VOLTMETER_CONTROL_PIN 13
 #define GAME1_BUTTON_PIN      27
 #define LED_PIN               4
-#define MIC_PIN               34
+#define DIGITAL_MIC_PIN       32
 
 // --- WiFi & Ağ Ayarları ---
 const char* ssid = "Ents_Test";
@@ -55,6 +44,8 @@ IPAddress subnet(255, 255, 255, 0);
 const char* mqtt_server = "192.168.20.208";
 const char* mqtt_client_id = "esp32_game_master";
 const char* topic_game_control = "game/control";
+const char* mqtt_command_topic = "esp32-gamemaster/command";
+const char* mqtt_status_topic = "esp32-gamemaster/status";
 
 // --- Web Sunucusu ve WebSocket Nesneleri ---
 AsyncWebServer server(80);
@@ -63,31 +54,33 @@ WiFiClient espClient;
 PubSubClient client(espClient);
 
 // --- Kontrol Edilebilir Ayarlar ---
-long game1_selectionInterval = 50; // İbrenin hızını buradan ayarlayabilirsiniz
+long game1_selectionInterval = 50;
 int game1_debounceDelay = 500;
-int STEPS_PER_90_DEG = 50;
-int stepper_max_speed = 250;
-int stepper_acceleration = 100;
+int STEPS_PER_360_DEG = 200;
+int STEPS_PER_90_DEG = STEPS_PER_360_DEG / 4;
+int stepper_max_speed = 400;
+int stepper_acceleration = 200;
 int stepper_search_speed = 25;
-int mic_threshold_high = 1800;
-int mic_threshold_low = 1500;
-int brightness_decrease_step = 10;
-int brightness_increase_step = 2;
+int brightness_decrease_step = 20;
+int brightness_increase_step = 10;
+const int MIC_LOOP_DELAY_MS = 20;
 
-// --- Genel Değişkenler ve Oyun Durumları ---
-enum GameMode { MODE_IDLE = 0, MODE_MANUAL_CONTROL, MODE_GAME1_VOLTMETER_SELECT, MODE_STEPPER_MOVING, MODE_AWAITING_AUTO_RFID, MODE_GAME2_ARGB_MICROPHONE, MODE_GAME2_WON };
-GameMode currentGameMode = MODE_GAME1_VOLTMETER_SELECT;
+// --- Oyun Durumları ---
+enum GameMode { MODE_IDLE = 0, MODE_MANUAL_CONTROL, MODE_HOMING, MODE_GAME1_VOLTMETER_SELECT, MODE_STEPPER_MOVING, MODE_AWAITING_AUTO_RFID, MODE_GAME2_ARGB_MICROPHONE, MODE_GAME2_WON };
+GameMode currentGameMode = MODE_HOMING;
 String last_rfid_uid = "None";
+enum HomingState { SEARCHING_FOR_CARD, SEARCHING_FOR_EDGE, MOVING_TO_CENTER, HOMING_COMPLETE };
+HomingState currentHomingState = SEARCHING_FOR_CARD;
+long card_detect_start_pos = 0;
+long card_detect_end_pos = 0;
 
+// --- Nesneler ve Diğer Değişkenler ---
 AccelStepper stepper(AccelStepper::DRIVER, STEPPER_STEP_PIN, STEPPER_DIR_PIN);
 MFRC522 mfrc522(RFID_SS_PIN, RFID_RST_PIN);
 Adafruit_NeoPixel strip(1, LED_PIN, NEO_GRB + NEO_KHZ800);
-
-// --- PWM Ayarları ---
 const int pwmFrequency = 5000;
 const int pwmChannel = 0;
-const int pwmResolution = 12; // PWM Çözünürlüğü 12-bit olarak ayarlandı
-
+const int pwmResolution = 12;
 float game1_targetVoltage = 0.0;
 float game1_voltageDirection = 0.1;
 int game1_selectionDutyCycle = 0;
@@ -95,60 +88,45 @@ unsigned long game1_lastSelectionUpdateTime = 0;
 unsigned long game1_lastButtonPressTime = 0;
 int game1_selectedLevel = 0;
 
-#define NUM_READINGS 50
-int game2_micReadings[NUM_READINGS];
-int game2_readIndex = 0; long game2_total = 0; int game2_averageMicValue = 0;
-bool game2_isBlowing = false;
-unsigned long game2_lastMicReadTime = 0; unsigned long game2_lastBrightnessUpdateTime = 0;
+// Kalibrasyon Verileri
+int calibrated_voltage_points[] = {  0, 200, 400, 600, 700, 800, 1000 };
+int calibrated_pwm_points[]     = {  0,  27,  31,  37,  65, 117,  220 };
+int calibration_points_count = sizeof(calibrated_voltage_points) / sizeof(int);
 
-// --- FONKSİYON PROTOTİPLERİ ---
-void notifyClients();
-String getStatusJSON();
-void handleWebSocketMessage(void *arg, uint8_t *data, size_t len);
-void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len);
-void runGame1_VoltmeterSelect();
-void runStepperMotor();
-void runStepperSearchAndRFID();
-void runGame2_ARGB_Microphone();
-void runIdleMode();
-void resetAndStartVoltmeterGame();
-void handleCardAndStartGame();
-bool compareUIDs(byte* uid1, const byte* uid2, int size);
-void runGame2WinSequence();
-int multiMap(int val, int* in, int* out, int size);
+//--- FONKSİYON PROTOTİPLERİ ---
+void notifyClients(); String getStatusJSON(); void handleWebSocketMessage(void *arg, uint8_t *data, size_t len); void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len);
+void runPreciseHoming(); void runGame1_VoltmeterSelect(); void runStepperMotor(); void runStepperSearchAndRFID(); void runGame2_ARGB_Microphone(); void runIdleMode();
+void resetAndStartVoltmeterGame(); void handleCardAndStartGame(); bool compareUIDs(byte* uid1, const byte* uid2, int size); void runGame2WinSequence(); int multiMap(int val, int* in, int* out, int size);
+void reconnect(); void mqttCallback(char* topic, byte* payload, unsigned int length); void startMicrophoneGame(); void setIdleMode();
 
-
-// ====================================================================================================
-//                                          SETUP
-// ====================================================================================================
+// ======================= SETUP =========================
 void setup() {
     Serial.begin(115200);
+    Serial.println("\n\n[SETUP] Device Starting...");
     pinMode(POWER_ENABLE_PIN, OUTPUT);
     pinMode(GAME1_BUTTON_PIN, INPUT_PULLUP);
     pinMode(STEPPER_ENABLE_PIN, OUTPUT);
-    digitalWrite(STEPPER_ENABLE_PIN, HIGH);
-    digitalWrite(POWER_ENABLE_PIN, HIGH);
+    pinMode(DIGITAL_MIC_PIN, INPUT);
+    digitalWrite(POWER_ENABLE_PIN, LOW);
+    digitalWrite(STEPPER_ENABLE_PIN, LOW);
 
     SPI.begin();
     mfrc522.PCD_Init();
     strip.begin();
     strip.show();
-    stepper.setMaxSpeed(stepper_max_speed);
-    stepper.setAcceleration(stepper_acceleration);
     
     ledcSetup(pwmChannel, pwmFrequency, pwmResolution);
     ledcAttachPin(VOLTMETER_CONTROL_PIN, pwmChannel);
 
     WiFi.config(staticIP, gateway, subnet);
     WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.println("\nWiFi Connected. IP Address: ");
+    Serial.print("[SETUP] Connecting to WiFi");
+    while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+    Serial.println("\n[SETUP] WiFi Connected. IP Address: ");
     Serial.println(WiFi.localIP());
 
     client.setServer(mqtt_server, 1883);
+    client.setCallback(mqttCallback);
 
     ws.onEvent(onEvent);
     server.addHandler(&ws);
@@ -156,30 +134,30 @@ void setup() {
         request->send_P(200, "text/html", index_html, nullptr);
     });
     server.begin();
-
-    game1_lastSelectionUpdateTime = millis();
+    Serial.println("[SETUP] Web server started.");
+    Serial.println("[SETUP] Setup complete. Entering Homing mode...");
 }
 
-// ====================================================================================================
-//                                          LOOP
-// ====================================================================================================
+// ======================= MAIN LOOP =========================
 void loop() {
     ws.cleanupClients();
-    if (client.connected()) {
-        client.loop();
+    if (!client.connected()) {
+        reconnect();
     }
+    client.loop();
 
     switch (currentGameMode) {
         case MODE_IDLE:                   runIdleMode(); break;
+        case MODE_HOMING:                 runPreciseHoming(); break;
         case MODE_GAME1_VOLTMETER_SELECT: runGame1_VoltmeterSelect(); break;
         case MODE_STEPPER_MOVING:         runStepperMotor(); break;
         case MODE_AWAITING_AUTO_RFID:     runStepperSearchAndRFID(); break;
         case MODE_GAME2_ARGB_MICROPHONE:  runGame2_ARGB_Microphone(); break;
         case MODE_GAME2_WON:              runGame2WinSequence(); break;
-        case MODE_MANUAL_CONTROL:         
+        case MODE_MANUAL_CONTROL:
             if (stepper.distanceToGo() == 0) {
                 digitalWrite(STEPPER_ENABLE_PIN, HIGH);
-                currentGameMode = MODE_IDLE;
+                setIdleMode();
             } else {
                 stepper.run();
             }
@@ -193,9 +171,7 @@ void loop() {
     }
 }
 
-// ====================================================================================================
-//                                      WEB ARAYÜZÜ İLETİŞİMİ
-// ====================================================================================================
+// ======================= İLETİŞİM FONKSİYONLARI =========================
 void notifyClients() { if(ws.count() > 0){ ws.textAll(getStatusJSON()); } }
 
 String getStatusJSON() {
@@ -204,6 +180,7 @@ String getStatusJSON() {
     switch(currentGameMode){
         case MODE_IDLE:                   mode_text = "Idle"; break;
         case MODE_MANUAL_CONTROL:         mode_text = "Manual Control"; break;
+        case MODE_HOMING:                 mode_text = "Homing..."; break;
         case MODE_GAME1_VOLTMETER_SELECT: mode_text = "Voltmeter Selection"; break;
         case MODE_STEPPER_MOVING:         mode_text = "Motor Moving to Target"; break;
         case MODE_AWAITING_AUTO_RFID:     mode_text = "Searching for RFID..."; break;
@@ -213,13 +190,13 @@ String getStatusJSON() {
     }
     status["gameMode"] = mode_text;
     status["buttonState"] = (digitalRead(GAME1_BUTTON_PIN) == LOW) ? "Pressed" : "Released";
-    status["micRaw"] = analogRead(MIC_PIN);
-    status["micAvg"] = game2_averageMicValue;
+    status["micStatus"] = (digitalRead(DIGITAL_MIC_PIN) == HIGH) ? "ACTIVE (Sound)" : "Passive";
     status["motorPosition"] = stepper.currentPosition();
     status["motorSpeed"] = stepper.speed();
     status["motorRunning"] = (stepper.distanceToGo() != 0);
     status["rfidStatus"] = last_rfid_uid;
     status["voltmeterSpeed"] = game1_selectionInterval;
+    status["ledBrightness"] = strip.getBrightness();
     return JSON.stringify(status);
 }
 
@@ -229,7 +206,7 @@ void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
         JSONVar cmd = JSON.parse((char*)data);
         if (JSON.typeof(cmd) == "undefined") { return; }
         String action = (const char*)cmd["action"];
-        if (action == "startGame") { resetAndStartVoltmeterGame(); } 
+        if (action == "startGame") { setIdleMode(); delay(100); currentGameMode = MODE_HOMING;}
         else if (action == "resetSystem") { ESP.restart(); }
         else if (action == "moveMotor") {
             currentGameMode = MODE_MANUAL_CONTROL;
@@ -246,10 +223,38 @@ void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType 
     else if(type == WS_EVT_DATA){ handleWebSocketMessage(arg, data, len); }
 }
 
-// ====================================================================================================
-//                                      OYUN VE YARDIMCI FONKSİYONLAR
-// ====================================================================================================
+void reconnect() {
+    while (!client.connected()) {
+        Serial.print("Attempting MQTT connection...");
+        if (client.connect(mqtt_client_id)) {
+            Serial.println("connected");
+            client.subscribe(mqtt_command_topic);
+        } else {
+            Serial.print("failed, rc="); Serial.print(client.state());
+            Serial.println(" try again in 5 seconds");
+            delay(5000);
+        }
+    }
+}
 
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+    String message;
+    for (int i = 0; i < length; i++) { message += (char)payload[i]; }
+    Serial.printf("MQTT Message arrived on topic: %s. Payload: %s\n", topic, message.c_str());
+    if (strcmp(topic, mqtt_command_topic) == 0) {
+        JSONVar cmd = JSON.parse(message);
+        if (JSON.typeof(cmd) == "undefined") { return; }
+        String action = (const char*)cmd["action"];
+        if (action == "start_mic_game") {
+            startMicrophoneGame();
+        } else if (action == "reset_game") {
+            setIdleMode();
+        }
+    }
+}
+
+
+// ======================= OYUN VE YARDIMCI FONKSİYONLAR =========================
 int multiMap(int val, int* in, int* out, int size) {
     if (val <= in[0]) return out[0];
     if (val >= in[size - 1]) return out[size - 1];
@@ -262,10 +267,13 @@ int multiMap(int val, int* in, int* out, int size) {
 bool compareUIDs(byte* uid1, const byte* uid2, int size) { for (int i = 0; i < size; i++) { if (uid1[i] != uid2[i]) { return false; } } return true; }
 
 void resetAndStartVoltmeterGame() {
-    Serial.println("Game sequence restarting...");
-    if (!client.connected()) client.connect(mqtt_client_id);
-    client.publish(topic_game_control, "{\"action\":\"reset_game\"}");
+    Serial.println("[ACTION] Starting Voltmeter game...");
+    if (client.connected()) {
+        client.publish(topic_game_control, "{\"action\":\"reset_game\"}");
+    }
     digitalWrite(POWER_ENABLE_PIN, HIGH);
+    stepper.setMaxSpeed(stepper_max_speed);
+    stepper.setAcceleration(stepper_acceleration);
     game1_targetVoltage = 0.0;
     game1_voltageDirection = 0.1;
     game1_lastSelectionUpdateTime = millis();
@@ -285,21 +293,77 @@ void handleCardAndStartGame() {
     const byte CARD_UID_GAME1[] = {0x75, 0x41, 0x61, 0x9A};
     const byte CARD_UID_GAME2[] = {0xFA, 0x44, 0xA9, 0x00};
     if (compareUIDs(mfrc522.uid.uidByte, CARD_UID_GAME2, 4)) {
-        int game2_currentBrightness = 255; game2_isBlowing = false;
-        strip.setBrightness(game2_currentBrightness);
-        strip.setPixelColor(0, strip.ColorHSV(0));
-        strip.show();
-        currentGameMode = MODE_GAME2_ARGB_MICROPHONE;
+        startMicrophoneGame();
     } else if (compareUIDs(mfrc522.uid.uidByte, CARD_UID_GAME1, 4)) {
-        if (!client.connected()) client.connect(mqtt_client_id);
-        char controlMsg[20]; sprintf(controlMsg, "start_game:%d", game1_selectedLevel);
-        client.publish(topic_game_control, controlMsg);
-        currentGameMode = MODE_IDLE;
+        if (!client.connected()) reconnect();
+        char jsonPayload[50];
+        sprintf(jsonPayload, "{\"action\":\"start_game\", \"level\":%d}", game1_selectedLevel);
+        client.publish(topic_game_control, jsonPayload);
+        Serial.printf("[MQTT] Command sent: %s\n", jsonPayload);
+        currentGameMode = MODE_HOMING;
+        currentHomingState = SEARCHING_FOR_CARD;
     } else {
-        currentGameMode = MODE_IDLE;
+        currentGameMode = MODE_HOMING;
+        currentHomingState = SEARCHING_FOR_CARD;
     }
     mfrc522.PICC_HaltA();
     notifyClients();
+}
+
+void runPreciseHoming() {
+    switch (currentHomingState) {
+        case SEARCHING_FOR_CARD: {
+            static bool entry_log = true;
+            if(entry_log){
+                Serial.println("[STATE] Homing: Searching for card...");
+                stepper.setAcceleration(50);
+                stepper.setMaxSpeed(100);
+                stepper.setSpeed(50);
+                digitalWrite(STEPPER_ENABLE_PIN, LOW);
+                entry_log = false;
+            }
+            stepper.runSpeed();
+            if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
+                card_detect_start_pos = stepper.currentPosition();
+                Serial.printf("[HOMING] Card leading edge found at: %ld\n", card_detect_start_pos);
+                currentHomingState = SEARCHING_FOR_EDGE;
+            }
+            break;
+        }
+        case SEARCHING_FOR_EDGE: {
+            stepper.runSpeed();
+            // Check for card presence every few steps to avoid constant reading
+            static unsigned long lastCheck = 0;
+            if(millis() - lastCheck > 50) {
+              lastCheck = millis();
+              if (!mfrc522.PICC_IsNewCardPresent()) {
+                  card_detect_end_pos = stepper.currentPosition();
+                  Serial.printf("[HOMING] Card trailing edge found at: %ld\n", card_detect_end_pos);
+                  long center_pos = (card_detect_start_pos + card_detect_end_pos) / 2;
+                  Serial.printf("[HOMING] Precise center calculated: %ld. Moving to center...\n", center_pos);
+                  stepper.moveTo(center_pos);
+                  currentHomingState = MOVING_TO_CENTER;
+              }
+            }
+            break;
+        }
+        case MOVING_TO_CENTER: {
+            if (stepper.distanceToGo() == 0) {
+                Serial.println("[HOMING] Centered. Position is now ZERO.");
+                stepper.setCurrentPosition(0);
+                digitalWrite(STEPPER_ENABLE_PIN, HIGH);
+                currentHomingState = HOMING_COMPLETE;
+                resetAndStartVoltmeterGame();
+            } else {
+                stepper.run();
+            }
+            break;
+        }
+        case HOMING_COMPLETE: {
+             // Do nothing, wait for game to start
+            break;
+        }
+    }
 }
 
 void runGame1_VoltmeterSelect() {
@@ -317,19 +381,20 @@ void runGame1_VoltmeterSelect() {
         game1_lastButtonPressTime = millis();
         digitalWrite(POWER_ENABLE_PIN, LOW);
         game1_selectedLevel = round(game1_targetVoltage);
-        if (game1_selectedLevel < 0) game1_selectedLevel = 0;
+        if (game1_selectedLevel < 1) game1_selectedLevel = 1;
         if (game1_selectedLevel > 10) game1_selectedLevel = 10;
-        if (game1_selectedLevel == 0) game1_selectedLevel = 1;
-        currentGameMode = MODE_STEPPER_MOVING;
-        long totalSteps = (long)(game1_selectedLevel) * STEPS_PER_90_DEG;
-        stepper.setCurrentPosition(0);
+        Serial.printf("[ACTION] Voltmeter stopped. Selected level: %d\n", game1_selectedLevel);
+        long totalSteps = (long)(game1_selectedLevel) * STEPS_PER_360_DEG;
+        Serial.printf("[MOTOR] Move calculated: %ld steps for %d full turns.\n", totalSteps, game1_selectedLevel);
         stepper.moveTo(totalSteps);
         digitalWrite(STEPPER_ENABLE_PIN, LOW);
+        currentGameMode = MODE_STEPPER_MOVING;
     }
 }
 
 void runStepperMotor() {
     if (stepper.distanceToGo() == 0) {
+        Serial.println("[MOTOR] Target reached. Switching to slow search mode.");
         stepper.setSpeed(stepper_search_speed);
         currentGameMode = MODE_AWAITING_AUTO_RFID;
     } else {
@@ -342,32 +407,33 @@ void runStepperSearchAndRFID() { stepper.runSpeed(); handleCardAndStartGame(); }
 void runGame2_ARGB_Microphone() {
     if (digitalRead(GAME1_BUTTON_PIN) == LOW && (millis() - game1_lastButtonPressTime > game1_debounceDelay)) {
         game1_lastButtonPressTime = millis();
-        resetAndStartVoltmeterGame();
+        setIdleMode();
+        delay(100);
+        currentGameMode = MODE_HOMING;
+        currentHomingState = SEARCHING_FOR_CARD;
         return;
     }
     int currentBrightness = strip.getBrightness();
     if (currentBrightness <= 0) {
-        Serial.println("!!! Mikrofon Oyunu KAZANILDI !!!");
+        Serial.println("[GAME] Microphone Game WON!");
         currentGameMode = MODE_GAME2_WON;
         return;
     }
-    if (millis() - game2_lastMicReadTime > 10) {
-        game2_lastMicReadTime = millis();
-        int micValue = analogRead(MIC_PIN);
-        game2_total = 0; for(int i=0; i<NUM_READINGS-1; i++) {game2_micReadings[i] = game2_micReadings[i+1]; game2_total += game2_micReadings[i];}
-        game2_micReadings[NUM_READINGS-1] = micValue; game2_total += micValue;
-        game2_averageMicValue = game2_total / NUM_READINGS;
-        if (game2_averageMicValue > mic_threshold_high) { game2_isBlowing = true; }
-        else if (game2_averageMicValue < mic_threshold_low) { game2_isBlowing = false; }
-    }
-    if (millis() - game2_lastBrightnessUpdateTime > 50) {
-        game2_lastBrightnessUpdateTime = millis();
-        if (game2_isBlowing) { currentBrightness -= brightness_decrease_step; }
-        else { currentBrightness += brightness_increase_step; }
-        if (currentBrightness < 0) currentBrightness = 0;
-        if (currentBrightness > 255) currentBrightness = 255;
+    
+    static unsigned long lastUpdate = 0;
+    if(millis() - lastUpdate > MIC_LOOP_DELAY_MS) {
+        lastUpdate = millis();
+        bool isMicActive = (digitalRead(DIGITAL_MIC_PIN) == HIGH);
+        
+        if (isMicActive) {
+            currentBrightness -= brightness_decrease_step;
+        } else {
+            currentBrightness += brightness_increase_step;
+        }
+        currentBrightness = constrain(currentBrightness, 0, 255);
         strip.setBrightness(currentBrightness);
         strip.show();
+        Serial.printf("[MIC GAME] Mic State: %s, Brightness: %d\n", isMicActive ? "HIGH (Active)" : "LOW (Passive)", currentBrightness);
     }
 }
 
@@ -375,7 +441,15 @@ void runGame2WinSequence() {
     static unsigned long winStartTime = 0;
     static unsigned long lastBlinkTime = 0;
     static bool ledState = true;
-    if (winStartTime == 0) { winStartTime = millis(); }
+    static bool commandsSent = false;
+    if (winStartTime == 0) {
+        winStartTime = millis();
+        commandsSent = false;
+        Serial.println("[STATE] Game 2 Won! Announcing to ESP1 and waiting 5 seconds...");
+        if (client.connected()) {
+            client.publish(mqtt_status_topic, "{\"event\":\"game2_won\"}");
+        }
+    }
     if (millis() - lastBlinkTime > 200) {
         lastBlinkTime = millis();
         ledState = !ledState;
@@ -387,16 +461,22 @@ void runGame2WinSequence() {
         }
         strip.show();
     }
-    if (millis() - winStartTime > 5000) {
-        winStartTime = 0;
-        currentGameMode = MODE_IDLE;
+    if (millis() - winStartTime > 5000 && !commandsSent) {
+        Serial.println("[TRANSITION] Win sequence finished. Triggering Game 1 on ESP1.");
+        if(client.connected()) {
+            client.publish(topic_game_control, "{\"action\":\"start_game\"}");
+        }
+        commandsSent = true;
+        setIdleMode(); 
     }
 }
 
 void runIdleMode() {
     if (digitalRead(GAME1_BUTTON_PIN) == LOW && (millis() - game1_lastButtonPressTime > game1_debounceDelay)) {
         game1_lastButtonPressTime = millis();
-        resetAndStartVoltmeterGame();
+        Serial.println("[ACTION] Restarting from IDLE via button press.");
+        currentGameMode = MODE_HOMING;
+        currentHomingState = SEARCHING_FOR_CARD;
         return;
     }
     digitalWrite(POWER_ENABLE_PIN, LOW);
@@ -404,4 +484,19 @@ void runIdleMode() {
     strip.setBrightness(0);
     strip.show();
     digitalWrite(STEPPER_ENABLE_PIN, HIGH);
+}
+
+void startMicrophoneGame() {
+    Serial.println("[ACTION] Starting Microphone Game directly.");
+    strip.setBrightness(255);
+    strip.setPixelColor(0, strip.Color(255, 0, 0)); // Kırmızı renk
+    strip.show();
+    currentGameMode = MODE_GAME2_ARGB_MICROPHONE;
+    notifyClients();
+}
+
+void setIdleMode() {
+    Serial.println("[ACTION] Setting to Idle Mode.");
+    currentGameMode = MODE_IDLE;
+    notifyClients();
 }
