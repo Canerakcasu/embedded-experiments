@@ -1,10 +1,9 @@
 /**
- * @file game_esp1_final_complete.ino
- * @brief Deadlight Game System with all features and fixes.
- * @version 12.0 - Grand Finale
+ * @file game_esp1_ultimate_final.ino
+ * @brief Ultimate final version for ESP1 with all features and fixes.
+ * @version 15.0 - Grand Finale
  */
 
-//--- KÜTÜPHANELER ---
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ESPAsyncWebServer.h>
@@ -25,15 +24,14 @@ const int   mqtt_port = 1883;
 const char* game_control_topic = "game/control";
 const char* game_status_topic = "game/status";
 const char* master_status_topic = "esp32-gamemaster/status";
+const char* esp1_connection_topic = "esp/esp1/connection";
 
 // Static IP Configuration
 IPAddress local_IP(192, 168, 20, 52);
 IPAddress gateway(192, 168, 20, 1);
 IPAddress subnet(255, 255, 255, 0);
-IPAddress primaryDNS(8, 8, 8, 8);
-IPAddress secondaryDNS(8, 8, 4, 4);
 
-//--- HARDWARE & GAME DEFINITIONS ---
+//--- HARDWARE & PINS ---
 #define LED_PIN             19
 #define MATRIX_CLK_PIN      33
 #define MATRIX_DATA_PIN     14
@@ -49,16 +47,16 @@ IPAddress secondaryDNS(8, 8, 4, 4);
 #define MATRIX_HARDWARE_TYPE MD_MAX72XX::FC16_HW
 #define MATRIX_MAX_DEVICES  4
 
-// Step 1 Game Settings
+//--- GAME SETTINGS (Variables for UI Control) ---
+int base_animation_interval = 250;
+int base_reaction_window = 500;
+int max_strikes = 3;
+const unsigned long GAME_DURATION = 10 * 60 * 1000;
+
+// Renk Tanımlamaları
 #define PROGRESS_COLOR      CRGB::Green
 #define ALERT_COLOR         CRGB::Red
 #define FAIL_COLOR          CRGB::DarkOrange
-#define BASE_ANIMATION_INTERVAL   250
-#define BASE_REACTION_WINDOW      500
-#define RESULT_SHOW_TIME    2000
-
-// Game Timer
-const unsigned long GAME_DURATION = 10 * 60 * 1000;
 
 // Sound File Numbers
 const uint8_t SOUND_S1_WELCOME = 1, SOUND_S1_END = 2, SOUND_S2_READY = 3, SOUND_S2_SUCCESS = 4, SOUND_S2_ERROR = 5;
@@ -69,9 +67,9 @@ const uint8_t SOUND_GRAND_FINALE = 8;
 const char STEP1_TARGET_WORD[] = "DEAD";
 const char* STEP2_LEVELS[] = {"OXOX", "XOOX", "XXXO", "OOOX"};
 enum GameLanguage { LANG_TR, LANG_EN };
-enum GameState { WAITING_TO_START, STEP1_INIT, STEP1_PLAYING, STEP1_COMPLETE, WAITING_FOR_STEP2, STEP2_INIT, STEP2_PLAYING, GAME_WON, GAME_OVER_TIMEOUT, GAME_OVER_STRIKES, BOTH_GAMES_WON };
+enum GameState { WAITING_TO_START, TRANSITION_TO_GAME1, STEP1_INIT, STEP1_PLAYING, STEP1_COMPLETE, WAITING_FOR_STEP2, STEP2_INIT, STEP2_PLAYING, GAME_WON, GAME_OVER_TIMEOUT, GAME_OVER_STRIKES, BOTH_GAMES_WON };
 const char* gameStateNames[] = {
-  "Waiting for Start", "Step 1 Starting", "Step 1 Playing", "Step 1 Complete",
+  "Waiting for Start", "Transition...", "Step 1 Starting", "Step 1 Playing", "Step 1 Complete",
   "Waiting for Step 2", "Step 2 Starting", "Step 2 Playing", "GAME 1 WON", "GAME OVER (TIME)", "GAME OVER (STRIKES)", "BOTH GAMES WON!"
 };
 
@@ -90,17 +88,17 @@ unsigned long stateTimer = 0;
 int step1Level = 0;
 int step2Level = 0;
 int playerStrikes = 0;
-const int MAX_STRIKES = 3;
 bool button_s2_state[4] = {false, false, false, false};
 bool dfPlayerStatus = false, wifiStatus = false;
 int gameVolume = 5;
+uint8_t last_played_sound_track = 0;
 char matrixBuffer[20] = "READY";
 int ledProgress = 0;
 int targetStep = 0;
 bool alertIsActive = false;
 unsigned long alertTimer = 0;
-int currentAnimationInterval = BASE_ANIMATION_INTERVAL;
-int currentReactionWindow = BASE_REACTION_WINDOW;
+int currentAnimationInterval = 250;
+int currentReactionWindow = 500;
 unsigned long gameStartTime = 0;
 bool gameTimerIsActive = false;
 bool game1_is_complete = false;
@@ -109,6 +107,7 @@ bool game2_is_complete = false;
 //--- FUNCTION PROTOTYPES ---
 void playSound(uint8_t); void showOnMatrix(const char*); void handleStep1(); void resetStep1Round(); String getStatusJSON();
 void notifyClients(); void publishStatus(); void processAction(JSONVar&); void mqttCallback(char*, byte*, unsigned int); void reconnectMQTT();
+void resetGame(bool fullSystemReset); void goToWaitingState(); void applySettings(JSONVar&);
 
 // ======================= SETUP =========================
 void setup() {
@@ -119,8 +118,7 @@ void setup() {
   mp3Serial.begin(9600, SERIAL_8N1, DFPLAYER_RX_PIN, DFPLAYER_TX_PIN);
   if (myDFPlayer.begin(mp3Serial)) { myDFPlayer.volume(gameVolume); dfPlayerStatus = true; }
   pinMode(BUTTON_1, INPUT_PULLUP); pinMode(BUTTON_2, INPUT_PULLUP); pinMode(BUTTON_3, INPUT_PULLUP); pinMode(BUTTON_4, INPUT_PULLUP);
-
-  if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) { Serial.println("STA Failed to configure"); }
+  if (!WiFi.config(local_IP, gateway, subnet)) { Serial.println("STA Failed to configure"); }
   WiFi.begin(wifi_ssid, wifi_password);
   Serial.print("Connecting to WiFi ");
   while (WiFi.status() != WL_CONNECTED && millis() < 10000) { delay(500); Serial.print("."); }
@@ -128,21 +126,17 @@ void setup() {
   wifiStatus = (WiFi.status() == WL_CONNECTED);
   if (wifiStatus) { Serial.print("WiFi Connected, IP: "); Serial.println(WiFi.localIP()); }
   else { Serial.println("WiFi connection failed."); }
-
   mqttClient.setServer(mqtt_server, mqtt_port);
   mqttClient.setCallback(mqttCallback);
-
   ws.onEvent([](AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
     if (type == WS_EVT_DATA) {
       JSONVar jsonData = JSON.parse((char*)data);
       processAction(jsonData);
-      notifyClients();
     }
   });
   server.addHandler(&ws);
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){ request->send_P(200, "text/html", index_html); });
   server.begin();
-
   showOnMatrix("READY");
 }
 
@@ -152,7 +146,6 @@ void loop() {
   ws.cleanupClients();
   if (wifiStatus && !mqttClient.connected()) reconnectMQTT();
   mqttClient.loop();
-
   if (gameTimerIsActive && (millis() - gameStartTime > GAME_DURATION)) {
     playSound(SOUND_S2_ERROR);
     showOnMatrix("TIME UP");
@@ -161,34 +154,44 @@ void loop() {
     gameTimerIsActive = false;
     notifyClients();
   }
-
   switch (currentState) {
     case WAITING_TO_START:
       break;
-
+    case TRANSITION_TO_GAME1: {
+        static unsigned long transitionStartTime = 0;
+        if (transitionStartTime == 0) {
+            transitionStartTime = millis();
+            playSound(SOUND_TRANSITION);
+            showOnMatrix("NEXT GAME");
+        }
+        if (millis() - transitionStartTime > 5000) {
+            transitionStartTime = 0;
+            currentState = STEP1_INIT;
+        }
+        break;
+    }
     case STEP1_INIT:
       playerStrikes = 0;
-      Serial.printf("[GAME] Step 1 starting. Strikes reset to %d\n", playerStrikes);
-      playSound(SOUND_TRANSITION);
-      delay(1000);
+      step1Level = 0;
+      Serial.printf("[GAME] Step 1 starting. Strikes & Level reset.\n");
+      if (!game1_is_complete && !game2_is_complete) {
+          playSound(SOUND_S1_WELCOME);
+      }
       showOnMatrix("");
       gameTimerIsActive = true;
       gameStartTime = millis();
       resetStep1Round();
       currentState = STEP1_PLAYING;
       break;
-
     case STEP1_PLAYING:
       handleStep1();
       break;
-
     case STEP1_COMPLETE:
       playSound(SOUND_S1_END);
       showOnMatrix("DEAD");
       stateTimer = millis();
       currentState = WAITING_FOR_STEP2;
       break;
-
     case WAITING_FOR_STEP2: {
       static bool prompt_shown = false;
       if (millis() - stateTimer > 4000 && !prompt_shown) {
@@ -205,14 +208,12 @@ void loop() {
       }
       break;
     }
-
     case STEP2_INIT:
       showOnMatrix(STEP2_LEVELS[step2Level]);
       stateTimer = millis();
       for (int i = 0; i < 4; i++) button_s2_state[i] = false;
       currentState = STEP2_PLAYING;
       break;
-
     case STEP2_PLAYING: {
       static char lastD[5] = "";
       if (millis() - stateTimer > 1000) {
@@ -244,32 +245,35 @@ void loop() {
       }
       break;
     }
-
     case GAME_WON: {
       static unsigned long winEntryTime = 0;
+      static bool soundPlayed = false;
       if (winEntryTime == 0) {
-        Serial.println("[GAME 1] WON! Waiting 5 seconds to start Game 2...");
+        Serial.println("[GAME 1] WON! Checking status...");
         showOnMatrix("SUCCESS!");
         game1_is_complete = true;
         winEntryTime = millis();
+        soundPlayed = false;
         if (game2_is_complete) {
             currentState = BOTH_GAMES_WON;
             winEntryTime = 0;
             return;
         }
       }
+      if (millis() - winEntryTime > 2500 && !soundPlayed) {
+          playSound(SOUND_TRANSITION);
+          soundPlayed = true;
+      }
       if (millis() - winEntryTime > 5000) {
         Serial.println("[TRANSITION] Sending command to start Game 2 on ESP2.");
         if (mqttClient.connected()) {
             mqttClient.publish("esp32-gamemaster/command", "{\"action\":\"start_mic_game\"}");
         }
-        JSONVar resetCmd = JSON.parse("{\"action\":\"reset_game\"}");
-        processAction(resetCmd);
+        goToWaitingState();
         winEntryTime = 0;
       }
       break;
     }
-    
     case BOTH_GAMES_WON: {
       static bool finaleMessageShown = false;
       if(!finaleMessageShown){
@@ -285,88 +289,107 @@ void loop() {
       }
       break;
     }
-
     case GAME_OVER_TIMEOUT:
       break;
-      
     case GAME_OVER_STRIKES: {
       static bool gameOverMessageShown = false;
       if (!gameOverMessageShown) {
         Serial.println("[GAME] Game Over due to 3 strikes.");
         showOnMatrix("GAME OVER");
-        fill_solid(leds, NUM_PIXELS, FAIL_COLOR);
-        FastLED.show();
+        fill_solid(leds, NUM_PIXELS, FAIL_COLOR); FastLED.show();
         playSound(SOUND_S2_ERROR);
         gameTimerIsActive = false;
         gameOverMessageShown = true;
       }
       if (digitalRead(BUTTON_1) == LOW) {
-        Serial.println("[SYSTEM] Restarting game from scratch after Game Over.");
+        Serial.println("[SYSTEM] Full system restart triggered by button after Game Over.");
         delay(500);
-        JSONVar resetCmd = JSON.parse("{\"action\":\"reset_game\"}");
-        processAction(resetCmd);
+        if(mqttClient.connected()) {
+          mqttClient.publish("esp32-gamemaster/command", "{\"action\":\"reset_game\"}");
+        }
+        resetGame(true);
         gameOverMessageShown = false;
       }
       break;
     }
   }
-
   static unsigned long lastUpdate = 0;
   if (millis() - lastUpdate > 500) {
     lastUpdate = millis();
     notifyClients();
-    publishStatus();
   }
 }
-
 //--- HELPER FUNCTIONS ---
-void playSound(uint8_t track) { if (dfPlayerStatus) myDFPlayer.playFolder((soundLanguage == LANG_TR) ? 1 : 2, track); }
+void playSound(uint8_t track) { if (dfPlayerStatus) { last_played_sound_track = track; myDFPlayer.playFolder((soundLanguage == LANG_TR) ? 1 : 2, track); } }
 void showOnMatrix(const char* text) { strcpy(matrixBuffer, text); P.displayClear(); P.displayText(matrixBuffer, PA_CENTER, 0, 0, PA_NO_EFFECT, PA_NO_EFFECT); }
 
+void goToWaitingState() {
+    Serial.println("Transitioning to WAITING_TO_START state (memory kept).");
+    fill_solid(leds, NUM_PIXELS, CRGB::Black); FastLED.show();
+    P.displayClear(); showOnMatrix("READY"); myDFPlayer.stop();
+    gameTimerIsActive = false;
+    step1Level = 0; step2Level = 0; playerStrikes = 0;
+    currentState = WAITING_TO_START;
+}
+void resetGame(bool fullSystemReset) {
+    Serial.println("Resetting game...");
+    if (fullSystemReset) {
+      Serial.println("Full system reset: Clearing completion flags.");
+      game1_is_complete = false;
+      game2_is_complete = false;
+    }
+    goToWaitingState();
+}
 // ======================= GAME LOGIC FUNCTIONS =========================
 void handleStep1() {
   if (digitalRead(BUTTON_1) == LOW) {
-    if (alertIsActive && (millis() - alertTimer < currentReactionWindow)) {
-      Serial.printf("[GAME] Level %d PASSED!\n", step1Level + 1);
-      playSound(SOUND_S2_SUCCESS);
-      step1Level++;
-      String pWord;
-      for (int i = 0; i < step1Level; i++) { pWord += STEP1_TARGET_WORD[i]; }
-      showOnMatrix(pWord.c_str());
-      if (step1Level >= 4) { currentState = STEP1_COMPLETE; }
-      else { resetStep1Round(); }
+    delay(50); 
+    if(digitalRead(BUTTON_1) == LOW){
+      if (alertIsActive) {
+        Serial.printf("[GAME] Level %d PASSED!\n", step1Level + 1);
+        playSound(SOUND_S2_SUCCESS);
+        step1Level++;
+        String pWord;
+        for (int i = 0; i < step1Level; i++) { pWord += STEP1_TARGET_WORD[i]; }
+        showOnMatrix(pWord.c_str());
+        if (step1Level >= 4) { currentState = STEP1_COMPLETE; }
+        else { resetStep1Round(); }
+      }
+      else {
+        playerStrikes++;
+        Serial.printf("[GAME] FAIL! Wrong time press. Strikes: %d / %d\n", playerStrikes, max_strikes);
+        playSound(SOUND_S2_ERROR);
+        if (playerStrikes >= max_strikes) { currentState = GAME_OVER_STRIKES; } 
+        else { showOnMatrix("FAIL"); delay(1000); showOnMatrix(""); }
+      }
+      while(digitalRead(BUTTON_1) == LOW);
     }
-    else {
-      playerStrikes++;
-      Serial.printf("[GAME] FAIL! Early press. Strikes: %d / %d\n", playerStrikes, MAX_STRIKES);
-      playSound(SOUND_S2_ERROR);
-      if (playerStrikes >= MAX_STRIKES) { currentState = GAME_OVER_STRIKES; } 
-      else { showOnMatrix("FAIL"); delay(1000); resetStep1Round(); }
-    }
-    delay(200); return;
-  }
-  if (alertIsActive && (millis() - alertTimer > currentReactionWindow)) {
-    playerStrikes++;
-    Serial.printf("[GAME] FAIL! Missed the alert. Strikes: %d / %d\n", playerStrikes, MAX_STRIKES);
-    playSound(SOUND_S2_ERROR);
-    if (playerStrikes >= MAX_STRIKES) { currentState = GAME_OVER_STRIKES; } 
-    else { showOnMatrix("FAIL"); delay(1000); resetStep1Round(); }
     return;
   }
   if (millis() - stateTimer > currentAnimationInterval) {
     stateTimer = millis();
     ledProgress++;
-    if (ledProgress >= NUM_PIXELS) { ledProgress = 0; }
+    if (ledProgress >= NUM_PIXELS) {
+      ledProgress = 0;
+      if (alertIsActive) {
+        alertIsActive = false;
+      }
+    }
     fill_solid(leds, NUM_PIXELS, CRGB::Black);
     fill_solid(leds, ledProgress, PROGRESS_COLOR);
-    if (ledProgress == targetStep && !alertIsActive) { alertIsActive = true; alertTimer = millis(); }
-    if (alertIsActive) { leds[ledProgress] = ALERT_COLOR; }
+    if (ledProgress == targetStep && !alertIsActive) {
+      alertIsActive = true;
+      alertTimer = millis();
+    }
+    if (alertIsActive) {
+      leds[ledProgress] = ALERT_COLOR;
+    }
     FastLED.show();
   }
 }
 void resetStep1Round() {
-  currentAnimationInterval = BASE_ANIMATION_INTERVAL - (step1Level * 35);
-  currentReactionWindow = BASE_REACTION_WINDOW - (step1Level * 60);
+  currentAnimationInterval = base_animation_interval - (step1Level * 35);
+  currentReactionWindow = base_reaction_window - (step1Level * 60);
   if (currentAnimationInterval < 100) currentAnimationInterval = 100;
   if (currentReactionWindow < 250) currentReactionWindow = 250;
   ledProgress = 0; alertIsActive = false;
@@ -374,7 +397,6 @@ void resetStep1Round() {
   fill_solid(leds, NUM_PIXELS, CRGB::Black); FastLED.show();
   stateTimer = millis();
 }
-
 // ======================= COMMUNICATION FUNCTIONS =========================
 String getStatusJSON() {
   JSONVar gameStateJson;
@@ -385,42 +407,73 @@ String getStatusJSON() {
   } else { strcpy(levelDetail, "--"); }
   gameStateJson["levelDetail"] = levelDetail;
   gameStateJson["matrix"] = String(matrixBuffer);
-  gameStateJson["volume"] = gameVolume;
   gameStateJson["soundLanguage"] = (soundLanguage == LANG_TR) ? "TR" : "EN";
-  gameStateJson["dfPlayerStatus"] = dfPlayerStatus;
   gameStateJson["wifiStatus"] = wifiStatus;
+  gameStateJson["dfPlayerStatus"] = dfPlayerStatus;
   if (gameTimerIsActive) {
     long remainingSeconds = (GAME_DURATION - (millis() - gameStartTime)) / 1000;
     gameStateJson["timer"] = remainingSeconds > 0 ? remainingSeconds : 0;
   } else {
     gameStateJson["timer"] = (currentState == WAITING_TO_START) ? GAME_DURATION / 1000 : 0;
   }
+  gameStateJson["game1_is_complete"] = game1_is_complete;
+  gameStateJson["game2_is_complete"] = game2_is_complete;
+  JSONVar settings;
+  settings["volume"] = gameVolume;
+  settings["base_animation_interval"] = base_animation_interval;
+  settings["base_reaction_window"] = base_reaction_window;
+  settings["max_strikes"] = max_strikes;
+  gameStateJson["settings"] = settings;
+  JSONVar hardwareStatus;
+  hardwareStatus["button1_pressed"] = (digitalRead(BUTTON_1) == LOW);
+  hardwareStatus["button2_pressed"] = (digitalRead(BUTTON_2) == LOW);
+  hardwareStatus["button3_pressed"] = (digitalRead(BUTTON_3) == LOW);
+  hardwareStatus["button4_pressed"] = (digitalRead(BUTTON_4) == LOW);
+  hardwareStatus["lastSoundTrack"] = last_played_sound_track;
+  gameStateJson["hardware"] = hardwareStatus;
   return JSON.stringify(gameStateJson);
 }
-
+void applySettings(JSONVar& newSettings) {
+    if (newSettings.hasOwnProperty("volume")) { gameVolume = (int)newSettings["volume"]; myDFPlayer.volume(gameVolume); }
+    if (newSettings.hasOwnProperty("base_animation_interval")) { base_animation_interval = (int)newSettings["base_animation_interval"]; }
+    if (newSettings.hasOwnProperty("base_reaction_window")) { base_reaction_window = (int)newSettings["base_reaction_window"]; }
+    if (newSettings.hasOwnProperty("max_strikes")) { max_strikes = (int)newSettings["max_strikes"]; }
+    Serial.println("[SETTINGS] ESP1 settings updated.");
+    notifyClients();
+}
 void processAction(JSONVar& jsonData) {
   if (jsonData.hasOwnProperty("action")) {
     String action = (const char*)jsonData["action"];
     if (action == "start_game") {
         if (currentState == WAITING_TO_START) {
-            playSound(SOUND_TRANSITION);
-            delay(1000);
-            currentState = STEP1_INIT;
-        } else if (currentState == WAITING_FOR_STEP2) {
-            currentState = STEP2_INIT;
+            if (game2_is_complete) { currentState = TRANSITION_TO_GAME1; } 
+            else { playSound(SOUND_S1_WELCOME); currentState = STEP1_INIT; }
         }
-    }
-    else if (action == "reset_game") {
-        Serial.println("Reset command received. Resetting game to idle.");
-        fill_solid(leds, NUM_PIXELS, CRGB::Black);
-        FastLED.show();
-        P.displayClear();
-        showOnMatrix("READY");
-        myDFPlayer.stop();
-        gameTimerIsActive = false;
-        game1_is_complete = false;
-        game2_is_complete = false;
-        currentState = WAITING_TO_START;
+    } else if (action == "reset_game") {
+        resetGame(true);
+    } else if (action == "skip_led_game") {
+        if (currentState >= STEP1_INIT && currentState < STEP1_COMPLETE) {
+            Serial.println("[COMMAND] Skipping LED game (Step 1)...");
+            step1Level = 4;
+            currentState = STEP1_COMPLETE;
+        }
+    } else if (action == "skip_xoxo_game") {
+        if (currentState >= WAITING_FOR_STEP2 && currentState < GAME_WON) {
+            Serial.println("[COMMAND] Skipping XOXO game (Step 2)...");
+            currentState = GAME_WON;
+        }
+    } else if (action == "replay_step1") {
+        Serial.println("[COMMAND] Replaying Game 1...");
+        resetGame(true);
+        delay(100);
+        JSONVar startCmd = JSON.parse("{\"action\":\"start_game\"}");
+        processAction(startCmd);
+    } else if (action == "force_win_game1") {
+        Serial.println("[COMMAND] Forcing Game 1 win...");
+        if(!game1_is_complete) {
+            game1_is_complete = true;
+            if(game2_is_complete) { currentState = BOTH_GAMES_WON; }
+        }
     }
     else if (action == "set_volume") { gameVolume = (int)jsonData["value"]; myDFPlayer.volume(gameVolume); }
     else if (action == "set_sound_language") {
@@ -428,16 +481,21 @@ void processAction(JSONVar& jsonData) {
       if (lang == "TR") { soundLanguage = LANG_TR; } else if (lang == "EN") { soundLanguage = LANG_EN; }
       myDFPlayer.stop();
     }
+     else if (action == "apply_settings") {
+        if(jsonData.hasOwnProperty("payload")) {
+            JSONVar settingsPayload = jsonData["payload"];
+            applySettings(settingsPayload);
+        }
+    }
   }
 }
 void notifyClients() { ws.textAll(getStatusJSON()); }
-void publishStatus() { if (mqttClient.connected()) { mqttClient.publish(game_status_topic, getStatusJSON().c_str(), true); } }
+void publishStatus() { if (mqttClient.connected()) { mqttClient.publish(game_status_topic, getStatusJSON().c_str(), false); } }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String message;
   for (int i = 0; i < length; i++) { message += (char)payload[i]; }
   Serial.print("MQTT Message Received ["); Serial.print(topic); Serial.print("]: "); Serial.println(message);
-
   if (strcmp(topic, master_status_topic) == 0) {
     JSONVar masterStatus = JSON.parse(message);
     if (masterStatus.hasOwnProperty("event") && String((const char*)masterStatus["event"]) == "game2_won") {
@@ -450,16 +508,14 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     else if (masterStatus.hasOwnProperty("mode")) {
       int masterMode = (int)masterStatus["mode"];
       if (masterMode == 2) { // Corresponds to MODE_HOMING on ESP2
-        if (currentState != WAITING_TO_START && currentState != GAME_WON && currentState != GAME_OVER_TIMEOUT && currentState != GAME_OVER_STRIKES && currentState != BOTH_GAMES_WON) {
+        if (currentState != WAITING_TO_START && currentState != BOTH_GAMES_WON && currentState != GAME_WON) {
           Serial.println("!!! Master ESP has re-homed. Resetting this ESP to idle. !!!");
-          JSONVar resetCmd = JSON.parse("{\"action\":\"reset_game\"}");
-          processAction(resetCmd);
+          resetGame(true);
         }
       }
     }
     return;
   }
-
   if (strcmp(topic, game_control_topic) == 0) {
       JSONVar j = JSON.parse(message);
       processAction(j);
@@ -470,10 +526,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
 void reconnectMQTT() {
   while (!mqttClient.connected()) {
-    String c = "ESP32_GameClient-" + String(random(0xffff), HEX);
-    Serial.print("Attempting MQTT connection...");
-    if (mqttClient.connect(c.c_str())) {
+    String clientId = "ESP1_GameClient-" + String(random(0xffff), HEX);
+    Serial.print("Attempting MQTT connection for ESP1...");
+    if (mqttClient.connect(clientId.c_str(), nullptr, nullptr, esp1_connection_topic, 0, true, "offline")) {
       Serial.println("connected");
+      mqttClient.publish(esp1_connection_topic, "online", true);
       mqttClient.subscribe(game_control_topic);
       mqttClient.subscribe(master_status_topic);
     } else {
