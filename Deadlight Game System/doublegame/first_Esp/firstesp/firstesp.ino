@@ -4,10 +4,8 @@
  * @version 15.0 - Final
  */
 
-
 #define MQTT_MAX_PACKET_SIZE 2048 
 
-//--- KÜTÜPHANELER ---
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ESPAsyncWebServer.h>
@@ -30,12 +28,11 @@ const char* game_status_topic = "game/status";
 const char* master_status_topic = "esp32-gamemaster/status";
 const char* esp1_connection_topic = "esp/esp1/connection";
 
-// Static IP Configuration
 IPAddress local_IP(192, 168, 20, 52);
 IPAddress gateway(192, 168, 20, 1);
 IPAddress subnet(255, 255, 255, 0);
 
-//--- HARDWARE & PINS ---
+//--- HARDWARE & GAME DEFINITIONS ---
 #define LED_PIN             19
 #define MATRIX_CLK_PIN      33
 #define MATRIX_DATA_PIN     14
@@ -50,8 +47,6 @@ IPAddress subnet(255, 255, 255, 0);
 #define BRIGHTNESS          80
 #define MATRIX_HARDWARE_TYPE MD_MAX72XX::FC16_HW
 #define MATRIX_MAX_DEVICES  4
-
-//--- GAME SETTINGS ---
 #define PROGRESS_COLOR      CRGB::Green
 #define ALERT_COLOR         CRGB::Red
 #define FAIL_COLOR          CRGB::DarkOrange
@@ -61,7 +56,6 @@ int base_reaction_window = 500;
 int max_strikes = 3;
 const unsigned long GAME_DURATION = 10 * 60 * 1000;
 
-// Sound File Numbers
 const uint8_t SOUND_S1_WELCOME = 1, SOUND_S1_END = 2, SOUND_S2_READY = 3, SOUND_S2_SUCCESS = 4, SOUND_S2_ERROR = 5;
 const uint8_t SOUND_TRANSITION = 7;
 const uint8_t SOUND_GRAND_FINALE = 8;
@@ -88,24 +82,15 @@ PubSubClient mqttClient(espClient);
 GameState currentState = WAITING_TO_START;
 GameLanguage soundLanguage = LANG_TR;
 unsigned long stateTimer = 0;
-int step1Level = 0;
-int step2Level = 0;
-int playerStrikes = 0;
+int step1Level = 0; int step2Level = 0; int playerStrikes = 0;
 bool button_s2_state[4] = {false, false, false, false};
-bool dfPlayerStatus = false, wifiStatus = false;
-int gameVolume = 5;
-uint8_t last_played_sound_track = 0;
+bool dfPlayerStatus = false; bool wifiStatus = false;
+int gameVolume = 5; uint8_t last_played_sound_track = 0;
 char matrixBuffer[20] = "READY";
-int ledProgress = 0;
-int targetStep = 0;
-bool alertIsActive = false;
-unsigned long alertTimer = 0;
-int currentAnimationInterval = 250;
-int currentReactionWindow = 500;
-unsigned long gameStartTime = 0;
-bool gameTimerIsActive = false;
-bool game1_is_complete = false;
-bool game2_is_complete = false;
+int ledProgress = 0; int targetStep = 0; bool alertIsActive = false;
+unsigned long alertTimer = 0; int currentAnimationInterval = 250; int currentReactionWindow = 500;
+unsigned long gameStartTime = 0; bool gameTimerIsActive = false;
+bool game1_is_complete = false; bool game2_is_complete = false;
 
 //--- FUNCTION PROTOTYPES ---
 void playSound(uint8_t); void showOnMatrix(const char*); void handleStep1(); void resetStep1Round(); String getStatusJSON();
@@ -136,7 +121,6 @@ void setup() {
     if (type == WS_EVT_DATA) {
       JSONVar jsonData = JSON.parse((char*)data);
       processAction(jsonData);
-      notifyClients();
     }
   });
   server.addHandler(&ws);
@@ -185,9 +169,7 @@ void loop() {
       resetStep1Round();
       currentState = STEP1_PLAYING;
       break;
-    case STEP1_PLAYING:
-      handleStep1();
-      break;
+    case STEP1_PLAYING: handleStep1(); break;
     case STEP1_COMPLETE:
       playSound(SOUND_S1_END);
       showOnMatrix("DEAD");
@@ -321,7 +303,6 @@ void loop() {
     notifyClients();
   }
 }
-
 //--- HELPER FUNCTIONS ---
 void playSound(uint8_t track) { if (dfPlayerStatus) { last_played_sound_track = track; myDFPlayer.playFolder((soundLanguage == LANG_TR) ? 1 : 2, track); } }
 void showOnMatrix(const char* text) { strcpy(matrixBuffer, text); P.displayClear(); P.displayText(matrixBuffer, PA_CENTER, 0, 0, PA_NO_EFFECT, PA_NO_EFFECT); }
@@ -374,10 +355,7 @@ void handleStep1() {
     ledProgress++;
     if (ledProgress >= NUM_PIXELS) {
       ledProgress = 0;
-      if (alertIsActive) {
-        alertIsActive = false;
-        Serial.println("[GAME] Alert window missed, loop continues without penalty.");
-      }
+      if (alertIsActive) { alertIsActive = false; }
     }
     fill_solid(leds, NUM_PIXELS, CRGB::Black);
     fill_solid(leds, ledProgress, PROGRESS_COLOR);
@@ -385,9 +363,7 @@ void handleStep1() {
       alertIsActive = true;
       alertTimer = millis();
     }
-    if (alertIsActive) {
-      leds[ledProgress] = ALERT_COLOR;
-    }
+    if (alertIsActive) { leds[ledProgress] = ALERT_COLOR; }
     FastLED.show();
   }
 }
@@ -401,7 +377,6 @@ void resetStep1Round() {
   fill_solid(leds, NUM_PIXELS, CRGB::Black); FastLED.show();
   stateTimer = millis();
 }
-
 // ======================= COMMUNICATION FUNCTIONS =========================
 String getStatusJSON() {
   JSONVar gameStateJson;
@@ -438,7 +413,6 @@ String getStatusJSON() {
   gameStateJson["hardware"] = hardwareStatus;
   return JSON.stringify(gameStateJson);
 }
-
 void applySettings(JSONVar& newSettings) {
     if (newSettings.hasOwnProperty("volume")) { gameVolume = (int)newSettings["volume"]; myDFPlayer.volume(gameVolume); }
     if (newSettings.hasOwnProperty("base_animation_interval")) { base_animation_interval = (int)newSettings["base_animation_interval"]; }
@@ -447,7 +421,6 @@ void applySettings(JSONVar& newSettings) {
     Serial.println("[SETTINGS] ESP1 settings updated.");
     notifyClients();
 }
-
 void processAction(JSONVar& jsonData) {
   if (jsonData.hasOwnProperty("action")) {
     String action = (const char*)jsonData["action"];
@@ -497,33 +470,19 @@ void processAction(JSONVar& jsonData) {
     }
   }
 }
-void notifyClients() {
-    // Veriyi her seferinde yeniden oluşturmak yerine, tek seferde oluşturup
-    // hem WebSocket'e hem de MQTT'ye gönderiyoruz.
-    String statusJson = getStatusJSON();
-    ws.textAll(statusJson); 
-    publishStatus(statusJson);
+void notifyClients() { 
+    String status = getStatusJSON();
+    ws.textAll(status); 
+    publishStatus(status);
 }
-
 void publishStatus(String jsonStatus) { 
     if (mqttClient.connected()) { 
-        // String nesnesini char array'e kopyala
-        // Bu, kütüphanenin daha stabil çalışmasını sağlar
-        int len = jsonStatus.length() + 1;
-        char message_buffer[len];
-        jsonStatus.toCharArray(message_buffer, len);
-
-        bool success = mqttClient.publish(game_status_topic, message_buffer, false); 
-        
+        bool success = mqttClient.publish(game_status_topic, jsonStatus.c_str(), false); 
         if (!success) {
             Serial.println("[MQTT] !! ESP1 FAILED TO PUBLISH STATUS !!");
-            Serial.printf("[MQTT] Client State: %d\n", mqttClient.state());
         }
-    } else {
-        Serial.println("[MQTT] Cannot publish, client not connected.");
-    }
+    } 
 }
-
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String message;
   for (int i = 0; i < length; i++) { message += (char)payload[i]; }

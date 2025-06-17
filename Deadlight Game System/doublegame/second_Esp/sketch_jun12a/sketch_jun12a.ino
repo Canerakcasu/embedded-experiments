@@ -1,10 +1,11 @@
 /**
  * @file esp32_master_controller_ultimate_final.ino
- * @brief The absolute final, complete code for ESP2 with all features.
+ * @brief The absolute final, definitive, and complete code for ESP2.
  * @version 16.3 - Final
  */
 
-//--- KÜTÜPHANELER ---
+#define MQTT_MAX_PACKET_SIZE 2048
+
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ESPAsyncWebServer.h>
@@ -57,7 +58,6 @@ PubSubClient client(espClient);
 
 // --- Kontrol Edilebilir Ayarlar ---
 long game1_selectionInterval = 50;
-int game1_debounceDelay = 500;
 int STEPS_PER_360_DEG = 200;
 int STEPS_PER_90_DEG = STEPS_PER_360_DEG / 4;
 int stepper_max_speed = 400;
@@ -66,6 +66,7 @@ int stepper_search_speed = 25;
 int brightness_decrease_step = 20;
 int brightness_increase_step = 10;
 const int MIC_LOOP_DELAY_MS = 20;
+int game1_debounceDelay = 500;
 
 // --- Oyun Durumları ---
 enum GameMode { MODE_IDLE = 0, MODE_MANUAL_CONTROL, MODE_HOMING, MODE_GAME1_VOLTMETER_SELECT, MODE_STEPPER_MOVING, MODE_AWAITING_AUTO_RFID, MODE_GAME2_ARGB_MICROPHONE, MODE_GAME2_WON };
@@ -89,6 +90,7 @@ int game1_selectionDutyCycle = 0;
 unsigned long game1_lastSelectionUpdateTime = 0;
 unsigned long game1_lastButtonPressTime = 0;
 int game1_selectedLevel = 0;
+bool wifiStatus = false;
 
 // Kalibrasyon Verileri
 int calibrated_voltage_points[] = {  0, 200, 400, 600, 700, 800, 1000 };
@@ -101,6 +103,7 @@ void runPreciseHoming(); void runGame1_VoltmeterSelect(); void runStepperMotor()
 void resetAndStartVoltmeterGame(); void handleCardAndStartGame(); bool compareUIDs(byte* uid1, const byte* uid2, int size); void runGame2WinSequence(); int multiMap(int val, int* in, int* out, int size);
 void reconnect(); void mqttCallback(char* topic, byte* payload, unsigned int length); void startMicrophoneGame(); void setIdleMode();
 void applySettings(JSONVar& newSettings);
+
 
 // ======================= SETUP =========================
 void setup() {
@@ -124,10 +127,13 @@ void setup() {
     WiFi.config(staticIP, gateway, subnet);
     WiFi.begin(ssid, password);
     Serial.print("[SETUP] Connecting to WiFi");
-    while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
-    Serial.println("\n[SETUP] WiFi Connected. IP Address: ");
-    Serial.println(WiFi.localIP());
+    while (WiFi.status() != WL_CONNECTED && millis() < 10000) { delay(500); Serial.print("."); }
+    Serial.println();
+    wifiStatus = (WiFi.status() == WL_CONNECTED);
+    if(wifiStatus) { Serial.print("[SETUP] WiFi Connected. IP Address: "); Serial.println(WiFi.localIP()); }
+    else { Serial.println("[SETUP] WiFi connection failed."); }
 
+    client.setBufferSize(2048);
     client.setServer(mqtt_server, 1883);
     client.setCallback(mqttCallback);
 
@@ -181,7 +187,10 @@ void notifyClients() {
         ws.textAll(statusJson); 
     }
     if(client.connected()) {
-        client.publish(mqtt_status_topic, statusJson.c_str(), false);
+        bool success = client.publish(mqtt_status_topic, statusJson.c_str(), false);
+        if (!success) {
+            Serial.println("[MQTT] !! ESP2 FAILED TO PUBLISH STATUS !!");
+        }
     }
 }
 
@@ -212,6 +221,7 @@ String getStatusJSON() {
     hardware["motorPosition"] = stepper.currentPosition();
     hardware["motorSpeed"] = stepper.speed();
     hardware["motorRunning"] = (stepper.distanceToGo() != 0);
+    hardware["wifiStatus"] = wifiStatus;
     status["hardware"] = hardware;
     
     JSONVar settings;
@@ -223,7 +233,7 @@ String getStatusJSON() {
     settings["micDecreaseStep"] = brightness_decrease_step;
     settings["micIncreaseStep"] = brightness_increase_step;
     status["settings"] = settings;
-
+    
     return JSON.stringify(status);
 }
 
@@ -245,7 +255,15 @@ void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
         JSONVar cmd = JSON.parse((char*)data);
         if (JSON.typeof(cmd) == "undefined") { return; }
         String action = (const char*)cmd["action"];
-        if (action == "startGame") { setIdleMode(); delay(100); currentGameMode = MODE_HOMING; currentHomingState = SEARCHING_FOR_CARD; }
+        if (action == "get_status") {
+            notifyClients();
+        }
+        else if (action == "startGame") { 
+            setIdleMode(); 
+            delay(100); 
+            currentGameMode = MODE_HOMING; 
+            currentHomingState = SEARCHING_FOR_CARD;
+        }
         else if (action == "resetSystem") { ESP.restart(); }
         else if (action == "moveMotor") {
             currentGameMode = MODE_MANUAL_CONTROL;
@@ -292,17 +310,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         JSONVar cmd = JSON.parse(message);
         if (JSON.typeof(cmd) == "undefined") { return; }
         String action = (const char*)cmd["action"];
-        if (action == "start_mic_game" || action == "replay_mic_game") {
-            startMicrophoneGame();
-        } else if (action == "reset_game") {
-            setIdleMode();
-            delay(100);
-            currentGameMode = MODE_HOMING;
-            currentHomingState = SEARCHING_FOR_CARD;
-        } else if (action == "skip_mic_game") {
-            Serial.println("[COMMAND] Skipping mic game...");
-            currentGameMode = MODE_GAME2_WON;
-        } else if (action == "force_win_game2") {
+        if (action == "start_mic_game" || action == "replay_mic_game") { startMicrophoneGame(); } 
+        else if (action == "reset_game") { setIdleMode(); delay(100); currentGameMode = MODE_HOMING; currentHomingState = SEARCHING_FOR_CARD; } 
+        else if (action == "skip_mic_game") { Serial.println("[COMMAND] Skipping mic game..."); currentGameMode = MODE_GAME2_WON; }
+        else if (action == "force_win_game2") {
             Serial.println("[COMMAND] Forcing Game 2 win...");
             if (client.connected()) { client.publish(mqtt_status_topic, "{\"event\":\"game2_won\"}"); }
             setIdleMode();
@@ -312,6 +323,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         applySettings(settings);
     }
 }
+
 
 // ======================= OYUN VE YARDIMCI FONKSİYONLAR =========================
 int multiMap(int val, int* in, int* out, int size) {
@@ -327,9 +339,7 @@ bool compareUIDs(byte* uid1, const byte* uid2, int size) { for (int i = 0; i < s
 
 void resetAndStartVoltmeterGame() {
     Serial.println("[ACTION] Starting Voltmeter game...");
-    if (client.connected()) {
-        client.publish(topic_game_control, "{\"action\":\"reset_game\"}");
-    }
+    if (client.connected()) { client.publish(topic_game_control, "{\"action\":\"reset_game\"}"); }
     digitalWrite(POWER_ENABLE_PIN, HIGH);
     stepper.setMaxSpeed(stepper_max_speed);
     stepper.setAcceleration(stepper_acceleration);
@@ -462,39 +472,44 @@ void runStepperMotor() {
 void runStepperSearchAndRFID() { stepper.runSpeed(); handleCardAndStartGame(); }
 
 void runGame2_ARGB_Microphone() {
+    // Oyunu resetlemek için buton kontrolü
     if (digitalRead(GAME1_BUTTON_PIN) == LOW && (millis() - game1_lastButtonPressTime > game1_debounceDelay)) {
         game1_lastButtonPressTime = millis();
-        setIdleMode(); delay(100); currentGameMode = MODE_HOMING;
+        setIdleMode(); 
+        delay(100);
+        currentGameMode = MODE_HOMING;
         currentHomingState = SEARCHING_FOR_CARD;
         return;
     }
-    
+
+    // LED parlaklığı 0'a ulaştıysa oyunu kazan
     int currentBrightness = strip.getBrightness();
     if (currentBrightness <= 0) {
         Serial.println("[GAME] Microphone Game WON!");
         currentGameMode = MODE_GAME2_WON;
         return;
     }
-
+    
+    // Parlaklık güncelleme zamanlayıcısı (artık programı bloklamıyor)
     static unsigned long lastUpdate = 0;
-    if(millis() - lastUpdate > MIC_LOOP_DELAY_MS) {
+    if(millis() - lastUpdate > 50) { // Her 50ms'de bir kontrol et
         lastUpdate = millis();
+
+        // Dijital mikrofon pinini oku
         bool isMicActive = (digitalRead(DIGITAL_MIC_PIN) == HIGH);
         
-        static bool lastMicState = !isMicActive;
-        if(isMicActive != lastMicState) {
-            Serial.printf("[MIC] State changed -> %s\n", isMicActive ? "ACTIVE (HIGH)" : "Passive (LOW)");
-            lastMicState = isMicActive;
-        }
-        
+        // Parlaklığı ayarla
         if (isMicActive) {
             currentBrightness -= brightness_decrease_step;
         } else {
             currentBrightness += brightness_increase_step;
         }
         currentBrightness = constrain(currentBrightness, 0, 255);
+
+        // Yeni parlaklığı LED'e ve loglara yansıt
         strip.setBrightness(currentBrightness);
         strip.show();
+        Serial.printf("[MIC GAME] Mic State: %s, Brightness: %d\n", isMicActive ? "HIGH (Active)" : "LOW (Passive)", currentBrightness);
     }
 }
 
