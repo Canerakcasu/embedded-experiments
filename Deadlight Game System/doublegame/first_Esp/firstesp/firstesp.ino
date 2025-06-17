@@ -1,9 +1,13 @@
 /**
  * @file game_esp1_ultimate_final.ino
- * @brief Ultimate final version for ESP1 with all features and fixes.
- * @version 15.0 - Grand Finale
+ * @brief The absolute final, definitive, and complete code for ESP1.
+ * @version 15.0 - Final
  */
 
+
+#define MQTT_MAX_PACKET_SIZE 2048 
+
+//--- KÜTÜPHANELER ---
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ESPAsyncWebServer.h>
@@ -47,16 +51,15 @@ IPAddress subnet(255, 255, 255, 0);
 #define MATRIX_HARDWARE_TYPE MD_MAX72XX::FC16_HW
 #define MATRIX_MAX_DEVICES  4
 
-//--- GAME SETTINGS (Variables for UI Control) ---
+//--- GAME SETTINGS ---
+#define PROGRESS_COLOR      CRGB::Green
+#define ALERT_COLOR         CRGB::Red
+#define FAIL_COLOR          CRGB::DarkOrange
+
 int base_animation_interval = 250;
 int base_reaction_window = 500;
 int max_strikes = 3;
 const unsigned long GAME_DURATION = 10 * 60 * 1000;
-
-// Renk Tanımlamaları
-#define PROGRESS_COLOR      CRGB::Green
-#define ALERT_COLOR         CRGB::Red
-#define FAIL_COLOR          CRGB::DarkOrange
 
 // Sound File Numbers
 const uint8_t SOUND_S1_WELCOME = 1, SOUND_S1_END = 2, SOUND_S2_READY = 3, SOUND_S2_SUCCESS = 4, SOUND_S2_ERROR = 5;
@@ -106,7 +109,7 @@ bool game2_is_complete = false;
 
 //--- FUNCTION PROTOTYPES ---
 void playSound(uint8_t); void showOnMatrix(const char*); void handleStep1(); void resetStep1Round(); String getStatusJSON();
-void notifyClients(); void publishStatus(); void processAction(JSONVar&); void mqttCallback(char*, byte*, unsigned int); void reconnectMQTT();
+void notifyClients(); void publishStatus(String jsonStatus); void processAction(JSONVar&); void mqttCallback(char*, byte*, unsigned int); void reconnectMQTT();
 void resetGame(bool fullSystemReset); void goToWaitingState(); void applySettings(JSONVar&);
 
 // ======================= SETUP =========================
@@ -126,12 +129,14 @@ void setup() {
   wifiStatus = (WiFi.status() == WL_CONNECTED);
   if (wifiStatus) { Serial.print("WiFi Connected, IP: "); Serial.println(WiFi.localIP()); }
   else { Serial.println("WiFi connection failed."); }
+  mqttClient.setBufferSize(2048);
   mqttClient.setServer(mqtt_server, mqtt_port);
   mqttClient.setCallback(mqttCallback);
   ws.onEvent([](AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
     if (type == WS_EVT_DATA) {
       JSONVar jsonData = JSON.parse((char*)data);
       processAction(jsonData);
+      notifyClients();
     }
   });
   server.addHandler(&ws);
@@ -155,8 +160,7 @@ void loop() {
     notifyClients();
   }
   switch (currentState) {
-    case WAITING_TO_START:
-      break;
+    case WAITING_TO_START: break;
     case TRANSITION_TO_GAME1: {
         static unsigned long transitionStartTime = 0;
         if (transitionStartTime == 0) {
@@ -174,9 +178,7 @@ void loop() {
       playerStrikes = 0;
       step1Level = 0;
       Serial.printf("[GAME] Step 1 starting. Strikes & Level reset.\n");
-      if (!game1_is_complete && !game2_is_complete) {
-          playSound(SOUND_S1_WELCOME);
-      }
+      if (!game1_is_complete && !game2_is_complete) { playSound(SOUND_S1_WELCOME); }
       showOnMatrix("");
       gameTimerIsActive = true;
       gameStartTime = millis();
@@ -319,10 +321,10 @@ void loop() {
     notifyClients();
   }
 }
+
 //--- HELPER FUNCTIONS ---
 void playSound(uint8_t track) { if (dfPlayerStatus) { last_played_sound_track = track; myDFPlayer.playFolder((soundLanguage == LANG_TR) ? 1 : 2, track); } }
 void showOnMatrix(const char* text) { strcpy(matrixBuffer, text); P.displayClear(); P.displayText(matrixBuffer, PA_CENTER, 0, 0, PA_NO_EFFECT, PA_NO_EFFECT); }
-
 void goToWaitingState() {
     Serial.println("Transitioning to WAITING_TO_START state (memory kept).");
     fill_solid(leds, NUM_PIXELS, CRGB::Black); FastLED.show();
@@ -340,6 +342,7 @@ void resetGame(bool fullSystemReset) {
     }
     goToWaitingState();
 }
+
 // ======================= GAME LOGIC FUNCTIONS =========================
 void handleStep1() {
   if (digitalRead(BUTTON_1) == LOW) {
@@ -373,6 +376,7 @@ void handleStep1() {
       ledProgress = 0;
       if (alertIsActive) {
         alertIsActive = false;
+        Serial.println("[GAME] Alert window missed, loop continues without penalty.");
       }
     }
     fill_solid(leds, NUM_PIXELS, CRGB::Black);
@@ -397,6 +401,7 @@ void resetStep1Round() {
   fill_solid(leds, NUM_PIXELS, CRGB::Black); FastLED.show();
   stateTimer = millis();
 }
+
 // ======================= COMMUNICATION FUNCTIONS =========================
 String getStatusJSON() {
   JSONVar gameStateJson;
@@ -433,6 +438,7 @@ String getStatusJSON() {
   gameStateJson["hardware"] = hardwareStatus;
   return JSON.stringify(gameStateJson);
 }
+
 void applySettings(JSONVar& newSettings) {
     if (newSettings.hasOwnProperty("volume")) { gameVolume = (int)newSettings["volume"]; myDFPlayer.volume(gameVolume); }
     if (newSettings.hasOwnProperty("base_animation_interval")) { base_animation_interval = (int)newSettings["base_animation_interval"]; }
@@ -441,6 +447,7 @@ void applySettings(JSONVar& newSettings) {
     Serial.println("[SETTINGS] ESP1 settings updated.");
     notifyClients();
 }
+
 void processAction(JSONVar& jsonData) {
   if (jsonData.hasOwnProperty("action")) {
     String action = (const char*)jsonData["action"];
@@ -473,6 +480,7 @@ void processAction(JSONVar& jsonData) {
         if(!game1_is_complete) {
             game1_is_complete = true;
             if(game2_is_complete) { currentState = BOTH_GAMES_WON; }
+            else { currentState = GAME_WON; }
         }
     }
     else if (action == "set_volume") { gameVolume = (int)jsonData["value"]; myDFPlayer.volume(gameVolume); }
@@ -489,8 +497,32 @@ void processAction(JSONVar& jsonData) {
     }
   }
 }
-void notifyClients() { ws.textAll(getStatusJSON()); }
-void publishStatus() { if (mqttClient.connected()) { mqttClient.publish(game_status_topic, getStatusJSON().c_str(), false); } }
+void notifyClients() {
+    // Veriyi her seferinde yeniden oluşturmak yerine, tek seferde oluşturup
+    // hem WebSocket'e hem de MQTT'ye gönderiyoruz.
+    String statusJson = getStatusJSON();
+    ws.textAll(statusJson); 
+    publishStatus(statusJson);
+}
+
+void publishStatus(String jsonStatus) { 
+    if (mqttClient.connected()) { 
+        // String nesnesini char array'e kopyala
+        // Bu, kütüphanenin daha stabil çalışmasını sağlar
+        int len = jsonStatus.length() + 1;
+        char message_buffer[len];
+        jsonStatus.toCharArray(message_buffer, len);
+
+        bool success = mqttClient.publish(game_status_topic, message_buffer, false); 
+        
+        if (!success) {
+            Serial.println("[MQTT] !! ESP1 FAILED TO PUBLISH STATUS !!");
+            Serial.printf("[MQTT] Client State: %d\n", mqttClient.state());
+        }
+    } else {
+        Serial.println("[MQTT] Cannot publish, client not connected.");
+    }
+}
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String message;
@@ -507,7 +539,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
     else if (masterStatus.hasOwnProperty("mode")) {
       int masterMode = (int)masterStatus["mode"];
-      if (masterMode == 2) { // Corresponds to MODE_HOMING on ESP2
+      if (masterMode == 2) { 
         if (currentState != WAITING_TO_START && currentState != BOTH_GAMES_WON && currentState != GAME_WON) {
           Serial.println("!!! Master ESP has re-homed. Resetting this ESP to idle. !!!");
           resetGame(true);
@@ -519,8 +551,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   if (strcmp(topic, game_control_topic) == 0) {
       JSONVar j = JSON.parse(message);
       processAction(j);
-      notifyClients();
-      publishStatus();
   }
 }
 
