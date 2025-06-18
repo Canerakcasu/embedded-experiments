@@ -1,7 +1,7 @@
 /**
- * @file game_esp1_ultimate_final.ino
+ * @file game_esp1_grand_finale.ino
  * @brief The absolute final, definitive, and complete code for ESP1.
- * @version 15.0 - Final
+ * @version 16.0 - Final
  */
 
 #define MQTT_MAX_PACKET_SIZE 2048 
@@ -28,11 +28,12 @@ const char* game_status_topic = "game/status";
 const char* master_status_topic = "esp32-gamemaster/status";
 const char* esp1_connection_topic = "esp/esp1/connection";
 
+// Static IP Configuration
 IPAddress local_IP(192, 168, 20, 52);
 IPAddress gateway(192, 168, 20, 1);
 IPAddress subnet(255, 255, 255, 0);
 
-//--- HARDWARE & GAME DEFINITIONS ---
+//--- HARDWARE & PINS ---
 #define LED_PIN             19
 #define MATRIX_CLK_PIN      33
 #define MATRIX_DATA_PIN     14
@@ -47,6 +48,8 @@ IPAddress subnet(255, 255, 255, 0);
 #define BRIGHTNESS          80
 #define MATRIX_HARDWARE_TYPE MD_MAX72XX::FC16_HW
 #define MATRIX_MAX_DEVICES  4
+
+//--- GAME SETTINGS ---
 #define PROGRESS_COLOR      CRGB::Green
 #define ALERT_COLOR         CRGB::Red
 #define FAIL_COLOR          CRGB::DarkOrange
@@ -302,6 +305,13 @@ void loop() {
     lastUpdate = millis();
     notifyClients();
   }
+  static unsigned long lastHeartbeat = 0;
+  if (millis() - lastHeartbeat > 5000) {
+    lastHeartbeat = millis();
+    if (mqttClient.connected()) {
+        mqttClient.publish(esp1_connection_topic, "online", true);
+    }
+  }
 }
 //--- HELPER FUNCTIONS ---
 void playSound(uint8_t track) { if (dfPlayerStatus) { last_played_sound_track = track; myDFPlayer.playFolder((soundLanguage == LANG_TR) ? 1 : 2, track); } }
@@ -455,8 +465,18 @@ void processAction(JSONVar& jsonData) {
             if(game2_is_complete) { currentState = BOTH_GAMES_WON; }
             else { currentState = GAME_WON; }
         }
+    } else if (action == "cpu_restart") {
+        Serial.println("[COMMAND] CPU Restart command received. Restarting...");
+        delay(500);
+        ESP.restart();
     }
-    else if (action == "set_volume") { gameVolume = (int)jsonData["value"]; myDFPlayer.volume(gameVolume); }
+    else if (action == "set_volume") { 
+      if (jsonData.hasOwnProperty("value")) {
+        gameVolume = (int)jsonData["value"]; 
+        myDFPlayer.volume(gameVolume);
+        Serial.printf("[SETTINGS] Volume set to: %d\n", gameVolume);
+      }
+    }
     else if (action == "set_sound_language") {
       String lang = (const char*)jsonData["value"];
       if (lang == "TR") { soundLanguage = LANG_TR; } else if (lang == "EN") { soundLanguage = LANG_EN; }
@@ -468,6 +488,7 @@ void processAction(JSONVar& jsonData) {
             applySettings(settingsPayload);
         }
     }
+    notifyClients();
   }
 }
 void notifyClients() { 
