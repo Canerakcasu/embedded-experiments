@@ -1,4 +1,4 @@
-eadlight: An Interactive Two-Stage Escape Room Game System
+Deadlight: An Interactive Two-Stage Escape Room Game System
 This repository contains the full source code and configuration for "Deadlight," a multi-stage, interactive escape room game system built using two ESP32 microcontrollers, various sensors/actuators, and a centralized Node-RED control dashboard.
 
 Project Overview
