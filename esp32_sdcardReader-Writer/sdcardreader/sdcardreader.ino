@@ -1,45 +1,28 @@
-/*****************************************************************************************
- * ESP32 Web Tabanlı Gelişmiş MP3 Çalar ve Dosya Yöneticisi v4 (Final Düzeltme)
- * * Değişiklikler:
- * - .replace() hatası düzeltildi.
- * - Tüm parantez yapıları kontrol edildi.
- *****************************************************************************************/
-
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <FS.h>
 #include <SD.h>
-
-// Gerekli ses kütüphanesi bileşenleri
+#include <SPI.h>
 #include "AudioGeneratorMP3.h"
 #include "AudioFileSourceSD.h"
 #include "AudioOutputI2S.h"
 
-// --- KULLANICI AYARLARI ---
-const char* ssid = "Ents_Test";      // Kendi Wi-Fi ağ adınızı yazın
-const char* password = "12345678"; // Kendi Wi-Fi şifrenizi yazın
+const char* ssid = "Ents_Test";
+const char* password = "12345678";
 
-// --- PIN TANIMLAMALARI ---
-#define SD_CS    5  // SD Kart Modülü CS pini
+#define SD_CS    5
+#define I2S_BCLK 26
+#define I2S_LRC  25
+#define I2S_DOUT 22
 
-#define I2S_BCLK 26 // I2S Amfi BCLK (Bit Clock) pini
-#define I2S_LRC  25 // I2S Amfi LRC (Left/Right Clock) pini
-#define I2S_DOUT 22 // I2S Amfi DIN (Data In) pini
-
-// --- GLOBAL NESNELER VE DEĞİŞKENLER ---
 AsyncWebServer server(80);
 File uploadFile;
-
-// Ses bileşenleri
 AudioGeneratorMP3 *mp3;
 AudioFileSourceSD *file;
 AudioOutputI2S *out;
-
-// Durum takibi için değişkenler
 String nowPlaying = "Hiçbiri";
-bool sdCardReady = false;
+bool sdCardInitialized = false;
 
-// --- WEB ARAYÜZÜ (HTML, CSS, JavaScript) ---
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
@@ -182,22 +165,22 @@ const char index_html[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-// --- YARDIMCI FONKSİYONLAR ---
 String listFiles() {
   String fileList = "";
+  if (!sdCardInitialized) { return "<p>SD Kart başlatılmadı.</p>"; }
   File root = SD.open("/");
-  if (!root) { return "<p>SD Kart kök dizini açılamadı!</p>"; }
+  if (!root) { return "<p>SD Kart kök dizini açılamadı! Lütfen kartı formatlayın.</p>"; }
   File file = root.openNextFile();
   while (file) {
     if (!file.isDirectory()) {
-      String fileNameWithPath = String(file.name());
-      if (fileNameWithPath.endsWith(".mp3") || fileNameWithPath.endsWith(".MP3")) {
-          // file.name() /file.mp3 gibi tam yol verir. Sadece dosya adını almak için baştaki / karakterini kaldıralım.
-          String fileName = fileNameWithPath.substring(1); 
-          fileList += "<li class='file-item'><span class='file-name'>" + fileName + "</span>";
-          fileList += "<div><a href='#' onclick='playFile(\"" + fileName + "\")' class='btn btn-play'>Çal</a>";
-          fileList += "<a href='#' onclick='renameFile(\"" + fileName + "\")' class='btn btn-rename'>Adlandır</a>";
-          fileList += "<a href='#' onclick='deleteFile(\"" + fileName + "\")' class='btn btn-delete'>Sil</a></div></li>";
+      const char* fileNameWithPath = file.name(); 
+      String tempStrCheck = String(fileNameWithPath);
+      if (tempStrCheck.endsWith(".mp3") || tempStrCheck.endsWith(".MP3")) {
+          const char* fileNameOnly = fileNameWithPath + 1; 
+          fileList += "<li class='file-item'><span class='file-name'>" + String(fileNameOnly) + "</span>";
+          fileList += "<div><a href='#' onclick='playFile(\"" + String(fileNameOnly) + "\")' class='btn btn-play'>Çal</a>";
+          fileList += "<a href='#' onclick='renameFile(\"" + String(fileNameOnly) + "\")' class='btn btn-rename'>Adlandır</a>";
+          fileList += "<a href='#' onclick='deleteFile(\"" + String(fileNameOnly) + "\")' class='btn btn-delete'>Sil</a></div></li>";
       }
     }
     file = root.openNextFile();
@@ -210,38 +193,33 @@ String listFiles() {
 void handleUpload(AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
   String path = "/" + filename;
   if (index == 0) {
-    if (mp3->isRunning()) { mp3->stop(); nowPlaying = "Hiçbiri"; }
-    Serial.printf("Yükleme başladı: %s\n", filename.c_str());
+    if (mp3 && mp3->isRunning()) { mp3->stop(); }
+    if (file) { delete file; file = nullptr; }
+    nowPlaying = "Hiçbiri";
     uploadFile = SD.open(path, FILE_WRITE);
-    if(!uploadFile){ Serial.println("Dosya oluşturulamadı."); return; }
   }
-  if(len){ uploadFile.write(data, len); }
+  if(uploadFile && len){ uploadFile.write(data, len); }
   if (final) {
-    uploadFile.close();
-    Serial.printf("Yükleme tamamlandı: %s, Boyut: %u byte\n", filename.c_str(), index + len);
+    if(uploadFile) uploadFile.close();
     request->send(200, "text/plain", "Dosya Başarıyla Yüklendi!");
   }
 }
 
-// --- ANA KURULUM VE DÖNGÜ ---
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n--- ESP32 Gelişmiş MP3 Çalar Başlatılıyor (v4 Final) ---");
+  Serial.println("\n--- ESP32 Gelişmiş MP3 Çalar (Nihai Sürüm) ---");
 
   if (SD.begin(SD_CS)) {
-    sdCardReady = true;
-    Serial.println("SD Kart başarıyla başlatıldı.");
+    sdCardInitialized = true;
+    Serial.println("SD Kart (VSPI) başarıyla başlatıldı.");
   } else {
-    sdCardReady = false;
-    Serial.println("SD Kart başlatılamadı!");
+    sdCardInitialized = false;
+    Serial.println("SD Kart (VSPI) başlatılamadı!");
   }
 
   WiFi.begin(ssid, password);
   Serial.print("Wi-Fi'ye bağlanılıyor...");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
+  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
   Serial.println("\nBağlantı başarılı!");
   Serial.print("ESP32 IP Adresi: http://");
   Serial.println(WiFi.localIP());
@@ -257,12 +235,10 @@ void setup() {
     request->send(200, "text/html", htmlPage);
   });
 
-  server.on("/upload", HTTP_POST, [](AsyncWebServerRequest *request){
-    request->send(200);
-  }, handleUpload);
+  server.on("/upload", HTTP_POST, [](AsyncWebServerRequest *request){ request->send(200); }, handleUpload);
 
   server.on("/play", HTTP_GET, [](AsyncWebServerRequest *request){
-    if (request->hasParam("file") && sdCardReady) {
+    if (request->hasParam("file") && sdCardInitialized) {
       if (mp3->isRunning()) { mp3->stop(); }
       if (file) { delete file; file = nullptr; }
       nowPlaying = request->getParam("file")->value();
@@ -271,19 +247,23 @@ void setup() {
       if (!file->isOpen()) {
         nowPlaying = "HATA: Dosya açılamadı";
         delete file; file = nullptr;
-        request->send(404, "text/plain", "Dosya bulunamadı");
+        request->send(404);
         return;
       }
-      mp3->begin(file, out);
-      Serial.printf("Çalınıyor: %s\n", path.c_str());
-      request->send(200, "text/plain", "Çalınıyor...");
-    } else {
-      request->send(400, "text/plain", "Hata.");
-    }
+      if (mp3->begin(file, out)) {
+        request->send(200);
+      } else {
+        nowPlaying = "HATA: MP3 başlatılamadı.";
+        if (file) { delete file; file = nullptr; }
+        request->send(500);
+      }
+    } else { request->send(400); }
   });
 
   server.on("/rename", HTTP_GET, [](AsyncWebServerRequest *request){
-    if (mp3->isRunning()) { mp3->stop(); nowPlaying = "Hiçbiri"; }
+    if (mp3->isRunning()) { mp3->stop(); }
+    if (file) { delete file; file = nullptr; }
+    nowPlaying = "Hiçbiri";
     if (request->hasParam("old") && request->hasParam("new")) {
       String oldPath = "/" + request->getParam("old")->value();
       String newPath = "/" + request->getParam("new")->value();
@@ -292,7 +272,9 @@ void setup() {
   });
 
   server.on("/delete", HTTP_GET, [](AsyncWebServerRequest *request){
-    if (mp3->isRunning()) { mp3->stop(); nowPlaying = "Hiçbiri"; }
+    if (mp3->isRunning()) { mp3->stop(); }
+    if (file) { delete file; file = nullptr; }
+    nowPlaying = "Hiçbiri";
     if (request->hasParam("file")) {
       String path = "/" + request->getParam("file")->value();
       if (SD.remove(path)) { request->send(200); } else { request->send(500); }
@@ -301,21 +283,27 @@ void setup() {
 
   server.on("/stop", HTTP_GET, [](AsyncWebServerRequest *request){
     if (mp3->isRunning()) { mp3->stop(); }
+    if (file) { delete file; file = nullptr; }
     nowPlaying = "Hiçbiri";
-    request->send(200, "text/plain", "Durduruldu.");
+    request->send(200);
   });
   
   server.on("/volume", HTTP_GET, [](AsyncWebServerRequest *request){
     if(request->hasParam("level")){
       out->SetGain(request->getParam("level")->value().toFloat());
       request->send(200);
-    } else {
-      request->send(400);
-    }
+    } else { request->send(400); }
   });
 
   server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request){
-    String sdStatus = sdCardReady ? "Hazır" : "Takılı Değil / Hata";
+    String sdStatus;
+    File root = SD.open("/");
+    if (root) {
+      sdStatus = "Hazır";
+      root.close();
+    } else {
+      sdStatus = "Takılı Değil / Hata";
+    }
     if (!mp3->isRunning() && nowPlaying != "Hiçbiri") {
       nowPlaying = "Hiçbiri";
     }
@@ -324,12 +312,17 @@ void setup() {
 
   server.begin();
   Serial.println("Web Sunucusu başlatıldı.");
-} // setup() fonksiyonunun kapanış parantezi
+}
 
 void loop() {
   if (mp3 && mp3->isRunning()) {
     if (!mp3->loop()) {
       mp3->stop();
+      if (file) {
+        delete file;
+        file = nullptr;
+      }
+      nowPlaying = "Hiçbiri";
     }
   }
 }
