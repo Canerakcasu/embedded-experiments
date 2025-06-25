@@ -118,7 +118,9 @@ Using the standard **VSPI** port for the SD card:
 
 ## 📸 Screenshots 
 
+![dashboard](https://github.com/user-attachments/assets/b92f6b13-0a20-4f53-b687-9178e48d7189)
 
+![folder](https://github.com/user-attachments/assets/e314da2e-f34d-4f58-9894-4136a391d67b)
 
 ---
 
