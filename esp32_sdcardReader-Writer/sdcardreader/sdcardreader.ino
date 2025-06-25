@@ -7,18 +7,17 @@
 #include "AudioFileSourceSD.h"
 #include "AudioOutputI2S.h"
 
-// --- USER SETTINGS ---
+// --- KULLANICI AYARLARI ---
 const char* ssid = "Ents_Test";
 const char* password = "12345678";
 
-// --- PIN DEFINITIONS (VSPI - Standard & Safe) ---
-#define SD_CS    5
-
+// --- PIN TANIMLAMALARI (VSPI - Standart & Güvenli) ---
+#define SD_CS   5
 #define I2S_BCLK 26
 #define I2S_LRC  25
 #define I2S_DOUT 22
 
-// --- GLOBAL OBJECTS & VARIABLES ---
+// --- GLOBAL NESNELER & DEĞİŞKENLER ---
 AsyncWebServer server(80);
 File uploadFile;
 AudioGeneratorMP3 *mp3;
@@ -27,7 +26,7 @@ AudioOutputI2S *out;
 String nowPlaying = "None";
 bool sdCardInitialized = false;
 
-// --- WEB INTERFACE (HTML, CSS, JavaScript) ---
+// --- WEB ARAYÜZÜ (HTML, CSS, JavaScript) ---
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
@@ -57,7 +56,6 @@ const char index_html[] PROGMEM = R"rawliteral(
     .volume-control label { font-size: 16px; margin-right: 10px; }
     .volume-control input[type="range"] { width: 50%; cursor: pointer; }
     .upload-form { margin-top: 30px; padding: 20px; background: #2a2a2a; border-radius: 8px; }
-    .explanation { font-size: 12px; color: #888; margin-top: 15px; }
     input[type="submit"] { background-color: #424242; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; transition: background-color 0.2s; }
     input[type="submit"]:hover { background-color: #555555; }
     #status { margin-top: 15px; font-style: italic; color: #aaa; text-align: center; }
@@ -68,73 +66,67 @@ const char index_html[] PROGMEM = R"rawliteral(
 <body>
   <div class="container">
     <h1>ESP32 Web Audio Player</h1>
-
     <div class="status-panel">
-      <h2>Status Panel</h2>
-      <p><span class="label">SD Card:</span> <span id="sd-status" class="value">Unknown</span></p>
-      <p><span class="label">Now Playing:</span> <span id="now-playing" class="value">None</span></p>
-      <a href="#" onclick="stopPlayback()" class="btn btn-stop" style="margin-top: 15px;">Stop Playback</a>
+      <h2>Durum Paneli</h2>
+      <p><span class="label">SD Kart:</span> <span id="sd-status" class="value">Bilinmiyor</span></p>
+      <p><span class="label">Şu An Çalan:</span> <span id="now-playing" class="value">None</span></p>
+      <a href="#" onclick="stopPlayback()" class="btn btn-stop" style="margin-top: 15px;">Çalmayı Durdur</a>
     </div>
-
     <div class="volume-control">
-      <label for="volume">Volume</label>
+      <label for="volume">Ses Seviyesi</label>
       <input type="range" id="volume" name="volume" min="0.0" max="4.0" step="0.1" value="1.0" onchange="setVolume(this.value)">
     </div>
-
-    <h2>Files on SD Card</h2>
+    <h2>SD Karttaki Dosyalar</h2>
     <ul class="file-list">
       %FILE_LIST%
     </ul>
-
     <div class="upload-form">
-      <h2>Upload New Audio File</h2>
+      <h2>Yeni Ses Dosyası Yükle</h2>
       <form id="upload-form" method="POST" enctype="multipart/form-data">
         <input type="file" name="upload" accept=".mp3">
-        <input type="submit" value="Upload">
+        <input type="submit" value="Yükle">
       </form>
-      <p class="explanation">Note: To ensure system stability, all uploaded files are saved with an 'x' prefix on the SD card (e.g., your file `audio.mp3` will be stored as `xaudio.mp3`).</p>
     </div>
     <div id="status"></div>
   </div>
-
   <script>
     function playFile(filename) {
-      document.getElementById('status').innerHTML = 'Sending play request for: ' + filename;
+      document.getElementById('status').innerHTML = 'Çalma isteği gönderiliyor: ' + filename;
       fetch('/play?file=' + encodeURIComponent(filename)).then(() => setTimeout(updateStatus, 500));
     }
     function renameFile(oldName) {
-      let newName = prompt("Enter a new name for the file:", oldName);
+      let newName = prompt("Dosya için yeni bir isim girin:", oldName);
       if (newName && newName !== "" && newName !== oldName) {
         if (!newName.toLowerCase().endsWith('.mp3')) { newName += '.mp3'; }
-        document.getElementById('status').innerHTML = 'Renaming ' + oldName + ' to ' + newName + '...';
+        document.getElementById('status').innerHTML = oldName + ' -> ' + newName + ' olarak değiştiriliyor...';
         fetch(`/rename?old=${encodeURIComponent(oldName)}&new=${encodeURIComponent(newName)}`)
           .then(response => {
             if (response.ok) {
-              document.getElementById('status').innerHTML = 'File successfully renamed.';
+              document.getElementById('status').innerHTML = 'Dosya başarıyla yeniden adlandırıldı.';
               setTimeout(() => { window.location.reload(); }, 1000);
             } else {
-              document.getElementById('status').innerHTML = 'Error: Could not rename file.';
+              document.getElementById('status').innerHTML = 'Hata: Dosya yeniden adlandırılamadı.';
             }
           });
       } else {
-        document.getElementById('status').innerHTML = 'Rename cancelled.';
+        document.getElementById('status').innerHTML = 'Yeniden adlandırma iptal edildi.';
       }
     }
     function deleteFile(filename) {
-      if (confirm('Are you sure you want to delete ' + filename + '?')) {
-        document.getElementById('status').innerHTML = 'Deleting ' + filename + '...';
+      if (confirm(filename + ' dosyasını silmek istediğinizden emin misiniz?')) {
+        document.getElementById('status').innerHTML = filename + ' siliniyor...';
         fetch('/delete?file=' + encodeURIComponent(filename)).then(response => {
           if (response.ok) {
-            document.getElementById('status').innerHTML = filename + ' was deleted.';
+            document.getElementById('status').innerHTML = filename + ' başarıyla silindi.';
             setTimeout(() => { window.location.reload(); }, 1000);
           } else {
-            document.getElementById('status').innerHTML = 'Error: Could not delete ' + filename;
+            document.getElementById('status').innerHTML = 'Hata: Dosya silinemedi.';
           }
         });
       }
     }
     function stopPlayback(){
-      document.getElementById('status').innerHTML = 'Sending stop request...';
+      document.getElementById('status').innerHTML = 'Durdurma isteği gönderiliyor...';
       fetch('/stop').then(() => setTimeout(updateStatus, 500));
     }
     function setVolume(value){
@@ -147,7 +139,7 @@ const char index_html[] PROGMEM = R"rawliteral(
           document.getElementById('sd-status').textContent = data.sd_status;
           document.getElementById('now-playing').textContent = data.now_playing;
         })
-        .catch(error => console.error('Error updating status:', error));
+        .catch(error => console.error('Durum güncellenirken hata:', error));
     }
     window.onload = function() {
       updateStatus();
@@ -160,10 +152,10 @@ const char index_html[] PROGMEM = R"rawliteral(
       const formData = new FormData(form);
       const fileInput = form.querySelector('input[type="file"]');
       if (!fileInput.files || fileInput.files.length === 0) {
-        statusDiv.innerHTML = 'Please select a file first.';
+        statusDiv.innerHTML = 'Lütfen önce bir dosya seçin.';
         return;
       }
-      statusDiv.innerHTML = 'Uploading, please wait...';
+      statusDiv.innerHTML = 'Yükleniyor, lütfen bekleyin...';
       fetch('/upload', { method: 'POST', body: formData })
       .then(response => response.text())
       .then(result => {
@@ -171,7 +163,7 @@ const char index_html[] PROGMEM = R"rawliteral(
         form.reset();
         setTimeout(() => { window.location.reload(); }, 2000);
       })
-      .catch(error => { statusDiv.innerHTML = 'Upload Error: ' + error; });
+      .catch(error => { statusDiv.innerHTML = 'Yükleme Hatası: ' + error; });
     });
   </script>
 </body>
@@ -180,61 +172,75 @@ const char index_html[] PROGMEM = R"rawliteral(
 
 String listFiles() {
   String fileList = "";
-  if (!sdCardInitialized) { return "<p>SD Card not initialized.</p>"; }
+  if (!sdCardInitialized) { return "<p>SD Kart başlatılamadı.</p>"; }
   File root = SD.open("/");
-  if (!root) { return "<p>Could not open root directory! Please format the card.</p>"; }
+  if (!root) { return "<p>Kök dizin açılamadı! Lütfen kartı formatlayın.</p>"; }
+  
   File file = root.openNextFile();
   while (file) {
     if (!file.isDirectory()) {
-      const char* fileNameWithPath = file.name(); 
-      String tempStrCheck = String(fileNameWithPath);
+      String tempStrCheck = String(file.name());
       if (tempStrCheck.endsWith(".mp3") || tempStrCheck.endsWith(".MP3")) {
-          const char* displayName = fileNameWithPath[1] == 'x' ? fileNameWithPath + 2 : fileNameWithPath + 1;
-          fileList += "<li class='file-item'><span class='file-name'>" + String(displayName) + "</span>";
-          fileList += "<div><a href='#' onclick='playFile(\"" + String(displayName) + "\")' class='btn btn-play'>Play</a>";
-          fileList += "<a href='#' onclick='renameFile(\"" + String(displayName) + "\")' class='btn btn-rename'>Rename</a>";
-          fileList += "<a href='#' onclick='deleteFile(\"" + String(displayName) + "\")' class='btn btn-delete'>Delete</a></div></li>";
+        const char* displayName = file.name(); 
+        
+        fileList += "<li class='file-item'><span class='file-name'>" + String(displayName) + "</span>";
+        fileList += "<div><a href='#' onclick='playFile(\"" + String(displayName) + "\")' class='btn btn-play'>Play</a>";
+        fileList += "<a href='#' onclick='renameFile(\"" + String(displayName) + "\")' class='btn btn-rename'>Rename</a>";
+        fileList += "<a href='#' onclick='deleteFile(\"" + String(displayName) + "\")' class='btn btn-delete'>Delete</a></div></li>";
       }
     }
     file = root.openNextFile();
   }
+  
   root.close();
-  if (fileList == "") { return "<p>No .mp3 files found on SD Card.</p>"; }
+  if (fileList == "") { return "<p>SD Kartta .mp3 dosyası bulunamadı.</p>"; }
   return fileList;
 }
 
 void handleUpload(AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
-  String path = "/x" + filename;
+  String path = "/" + filename;
+
   if (index == 0) {
     if (mp3 && mp3->isRunning()) { mp3->stop(); }
     if (file) { delete file; file = nullptr; }
     nowPlaying = "None";
     uploadFile = SD.open(path, FILE_WRITE);
+    if (!uploadFile) {
+        Serial.println("Yükleme için dosya oluşturulamadı!");
+        return;
+    }
   }
-  if(uploadFile && len){ uploadFile.write(data, len); }
+
+  if (uploadFile && len) {
+    uploadFile.write(data, len);
+  }
+
   if (final) {
-    if(uploadFile) uploadFile.close();
-    request->send(200, "text/plain", "File Uploaded Successfully!");
+    if (uploadFile) {
+        uploadFile.close();
+        Serial.println("Dosya Yüklendi: " + path);
+        request->send(200, "text/plain", "Dosya Başarıyla Yüklendi!");
+    }
   }
 }
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n--- ESP32 Advanced Audio Player (Final Version) ---");
+  Serial.println("\n--- ESP32 Web Ses Oynatıcı ---");
 
   if (SD.begin(SD_CS)) {
     sdCardInitialized = true;
-    Serial.println("SD Card (VSPI) initialized successfully.");
+    Serial.println("SD Kart (VSPI) başarıyla başlatıldı.");
   } else {
     sdCardInitialized = false;
-    Serial.println("SD Card (VSPI) failed to initialize!");
+    Serial.println("SD Kart (VSPI) başlatılamadı!");
   }
 
   WiFi.begin(ssid, password);
-  Serial.print("Connecting to Wi-Fi...");
+  Serial.print("Wi-Fi ağına bağlanılıyor...");
   while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
-  Serial.println("\nConnected successfully!");
-  Serial.print("ESP32 IP Address: http://");
+  Serial.println("\nBaşarıyla bağlanıldı!");
+  Serial.print("ESP32 IP Adresi: http://");
   Serial.println(WiFi.localIP());
 
   out = new AudioOutputI2S();
@@ -248,22 +254,25 @@ void setup() {
     request->send(200, "text/html", htmlPage);
   });
   
-  server.on("/upload", HTTP_POST, [](AsyncWebServerRequest *request){ request->send(200); }, handleUpload);
+  server.on("/upload", HTTP_POST, [](AsyncWebServerRequest *request){ /* Boş yanıt yeterli */ }, handleUpload);
   
   server.on("/play", HTTP_GET, [](AsyncWebServerRequest *request){
     if (request->hasParam("file") && sdCardInitialized) {
-      if (mp3->isRunning()) { mp3->stop(); }
+      if (mp3 && mp3->isRunning()) { mp3->stop(); }
       if (file) { delete file; file = nullptr; }
+      
       nowPlaying = request->getParam("file")->value();
-      String path = "/x" + nowPlaying;
+      String path = "/" + nowPlaying;
+      
       file = new AudioFileSourceSD(path.c_str());
       if (!file->isOpen()) {
-        nowPlaying = "ERROR: File not found";
+        nowPlaying = "HATA: Dosya bulunamadı";
         delete file; file = nullptr;
         request->send(404); return;
       }
+      
       if (!mp3->begin(file, out)) {
-        nowPlaying = "ERROR: Could not start MP3";
+        nowPlaying = "HATA: MP3 başlatılamadı";
         if (file) { delete file; file = nullptr; }
         request->send(500);
       } else {
@@ -273,28 +282,32 @@ void setup() {
   });
 
   server.on("/rename", HTTP_GET, [](AsyncWebServerRequest *request){
-    if (mp3->isRunning()) { mp3->stop(); }
+    if (mp3 && mp3->isRunning()) { mp3->stop(); }
     if (file) { delete file; file = nullptr; }
     nowPlaying = "None";
+    
     if (request->hasParam("old") && request->hasParam("new")) {
-      String oldPath = "/x" + request->getParam("old")->value();
-      String newPath = "/x" + request->getParam("new")->value();
+      String oldPath = "/" + request->getParam("old")->value();
+      String newPath = "/" + request->getParam("new")->value();
+      
       if (SD.rename(oldPath, newPath)) { request->send(200); } else { request->send(500); }
     } else { request->send(400); }
   });
 
   server.on("/delete", HTTP_GET, [](AsyncWebServerRequest *request){
-    if (mp3->isRunning()) { mp3->stop(); }
+    if (mp3 && mp3->isRunning()) { mp3->stop(); }
     if (file) { delete file; file = nullptr; }
     nowPlaying = "None";
+    
     if (request->hasParam("file")) {
-      String path = "/x" + request->getParam("file")->value();
+      String path = "/" + request->getParam("file")->value();
+      
       if (SD.remove(path)) { request->send(200); } else { request->send(500); }
     } else { request->send(400); }
   });
 
   server.on("/stop", HTTP_GET, [](AsyncWebServerRequest *request){
-    if (mp3->isRunning()) { mp3->stop(); }
+    if (mp3 && mp3->isRunning()) { mp3->stop(); }
     if (file) { delete file; file = nullptr; }
     nowPlaying = "None";
     request->send(200);
@@ -309,21 +322,23 @@ void setup() {
 
   server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request){
     String sdStatus;
-    File root = SD.open("/");
-    if (root) {
-      sdStatus = "Ready";
-      root.close();
+    File rootTest = SD.open("/");
+    if (rootTest) {
+      sdStatus = "Hazır";
+      rootTest.close();
     } else {
-      sdStatus = "Not Detected / Error";
+      sdStatus = "Algılanmadı / Hata";
     }
-    if (!mp3->isRunning() && nowPlaying != "None") {
+    
+    if (mp3 && !mp3->isRunning() && nowPlaying != "None") {
       nowPlaying = "None";
     }
+    
     request->send(200, "application/json", "{\"sd_status\":\"" + sdStatus + "\", \"now_playing\":\"" + nowPlaying + "\"}");
   });
 
   server.begin();
-  Serial.println("Web Server started.");
+  Serial.println("Web Sunucusu başlatıldı.");
 }
 
 void loop() {
