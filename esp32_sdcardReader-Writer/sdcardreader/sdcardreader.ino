@@ -7,17 +7,14 @@
 #include "AudioFileSourceSD.h"
 #include "AudioOutputI2S.h"
 
-// --- KULLANICI AYARLARI ---
 const char* ssid = "Ents_Test";
 const char* password = "12345678";
 
-// --- PIN TANIMLAMALARI ---
 #define SD_CS   5
 #define I2S_BCLK 26
 #define I2S_LRC  25
 #define I2S_DOUT 22
 
-// --- GLOBAL NESNELER & DEĞİŞKENLER ---
 AsyncWebServer server(80);
 File uploadFile;
 AudioGeneratorMP3 *mp3;
@@ -26,16 +23,14 @@ AudioOutputI2S *out;
 String nowPlaying = "None";
 bool sdCardInitialized = false;
 
-// --- Çekirdekler Arası İletişim İçin ---
 enum CommandType { CMD_NONE, CMD_PLAY, CMD_STOP, CMD_RENAME, CMD_DELETE };
-CommandType command = CMD_NONE;
+volatile CommandType command = CMD_NONE;
 String commandParam1 = "";
 String commandParam2 = "";
 
 SemaphoreHandle_t commandMutex;
 SemaphoreHandle_t nowPlayingMutex;
 
-// --- WEB ARAYÜZÜ (HTML) ---
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
@@ -50,7 +45,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     .status-panel { background-color: #2a2a2a; padding: 15px; border-radius: 8px; margin-bottom: 20px; text-align: center;}
     .status-panel p { margin: 8px 0; font-size: 16px; }
     .status-panel .label { font-weight: bold; color: #aaa; }
-    .status-panel .value { color: #03dac6; font-weight: bold; }
+    .status-panel .value { font-weight: bold; transition: color 0.5s ease; }
     .file-list { list-style: none; padding: 0; }
     .file-item { display: flex; align-items: center; justify-content: space-between; padding: 12px; border-bottom: 1px solid #333; }
     .file-item:last-child { border-bottom: none; }
@@ -77,6 +72,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     <h1>ESP32 Web Audio Player</h1>
     <div class="status-panel">
       <h2>Status Panel</h2>
+      <p><span class="label">ESP32 Status:</span> <span id="esp-status" class="value" style="color: #ffc107;">Connecting...</span></p>
       <p><span class="label">SD Card:</span> <span id="sd-status" class="value">Unknown</span></p>
       <p><span class="label">Now Playing:</span> <span id="now-playing" class="value">None</span></p>
       <a href="#" onclick="stopPlayback()" class="btn btn-stop" style="margin-top: 15px;">Stop Playback</a>
@@ -147,13 +143,23 @@ const char index_html[] PROGMEM = R"rawliteral(
         .then(data => {
           document.getElementById('sd-status').textContent = data.sd_status;
           document.getElementById('now-playing').textContent = data.now_playing;
+          const espStatus = document.getElementById('esp-status');
+          espStatus.textContent = 'Online';
+          espStatus.style.color = '#28a745';
         })
-        .catch(error => console.error('Error updating status:', error));
+        .catch(error => {
+          console.error('Error updating status:', error);
+          const espStatus = document.getElementById('esp-status');
+          espStatus.textContent = 'Offline';
+          espStatus.style.color = '#dc3545';
+        });
     }
+    
     window.onload = function() {
       updateStatus();
       setInterval(updateStatus, 5000); 
     };
+
     const form = document.getElementById('upload-form');
     form.addEventListener('submit', function(event) {
       event.preventDefault();
@@ -182,20 +188,16 @@ const char index_html[] PROGMEM = R"rawliteral(
 String listFiles() {
   String fileList = "";
   if (!sdCardInitialized) { return "<p>SD Card not initialized.</p>"; }
-  
-  // DEĞİŞİKLİK: Kök dizin yerine /mp3 klasörünü aç
   File root = SD.open("/mp3");
   if (!root) {
-    Serial.println("Failed to open /mp3 directory");
     return "<p>Could not open /mp3 directory!</p>";
   }
-  
   File file = root.openNextFile();
   while (file) {
     if (!file.isDirectory()) {
       String tempStrCheck = String(file.name());
       if (tempStrCheck.endsWith(".mp3") || tempStrCheck.endsWith(".MP3")) {
-        const char* displayName = file.name(); 
+        const char* displayName = file.name();
         fileList += "<li class='file-item'><span class='file-name'>" + String(displayName) + "</span>";
         fileList += "<div><a href='#' onclick='playFile(\"" + String(displayName) + "\")' class='btn btn-play'>Play</a>";
         fileList += "<a href='#' onclick='renameFile(\"" + String(displayName) + "\")' class='btn btn-rename'>Rename</a>";
@@ -204,7 +206,6 @@ String listFiles() {
     }
     file = root.openNextFile();
   }
-  
   root.close();
   if (fileList == "") { return "<p>No .mp3 files found in /mp3 folder.</p>"; }
   return fileList;
@@ -212,11 +213,7 @@ String listFiles() {
 
 void handleUpload(AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
   xSemaphoreTake(commandMutex, portMAX_DELAY);
-  Serial.printf("[Core 0] Handling file upload chunk for %s\n", filename.c_str());
-  
-  // DEĞİŞİKLİK: Dosya yolunu /mp3 klasörünün içine ayarla
   String path = "/mp3/" + filename;
-
   if (index == 0) {
     if (mp3 && mp3->isRunning()) mp3->stop();
     if(file) delete file;
@@ -226,149 +223,78 @@ void handleUpload(AsyncWebServerRequest *request, String filename, size_t index,
     xSemaphoreGive(nowPlayingMutex);
     uploadFile = SD.open(path, FILE_WRITE);
   }
-  if (uploadFile && len) {
+  if (uploadFile && len && uploadFile) {
     uploadFile.write(data, len);
   }
   if (final) {
     if(uploadFile) uploadFile.close();
     request->send(200, "text/plain", "File Uploaded Successfully!");
-    Serial.printf("[Core 0] Finished file upload for %s\n", filename.c_str());
   }
   xSemaphoreGive(commandMutex);
 }
 
 void AudioFileTask(void *pvParameters) {
-  Serial.printf("Audio and File Task started on core %d\n", xPortGetCoreID());
-
   for (;;) {
-    CommandType localCommand = CMD_NONE;
+    CommandType localCommand;
     String localParam1, localParam2;
-
-    xSemaphoreTake(commandMutex, portMAX_DELAY);
-    if (command != CMD_NONE) {
-      localCommand = command;
-      localParam1 = commandParam1;
-      localParam2 = commandParam2;
-      command = CMD_NONE;
-    }
-    xSemaphoreGive(commandMutex);
     
+    xSemaphoreTake(commandMutex, portMAX_DELAY);
+    localCommand = command;
+    localParam1 = commandParam1;
+    localParam2 = commandParam2;
+    command = CMD_NONE;
+    xSemaphoreGive(commandMutex);
+
     if (localCommand != CMD_NONE) {
       if (mp3 && mp3->isRunning()) mp3->stop();
-      if (file) delete file;
-      file = nullptr;
-
+      if (file) { delete file; file = nullptr; }
       xSemaphoreTake(nowPlayingMutex, portMAX_DELAY);
       nowPlaying = "None";
       xSemaphoreGive(nowPlayingMutex);
-        
       if (localCommand == CMD_PLAY) {
-        // DEĞİŞİKLİK: Dosya yolunu /mp3 klasörünün içine ayarla
         String path = "/mp3/" + localParam1;
-        Serial.printf("[Core 0] Processing PLAY command. Attempting to open: %s\n", path.c_str());
         file = new AudioFileSourceSD(path.c_str());
         if (!file || !file->isOpen()) {
-            Serial.printf("[Core 0] Error: File not found at path: %s\n", path.c_str());
             xSemaphoreTake(nowPlayingMutex, portMAX_DELAY);
             nowPlaying = "ERROR: File not found";
             xSemaphoreGive(nowPlayingMutex);
-            if(file) delete file; 
-            file = nullptr;
+            if(file) { delete file; file = nullptr; }
         } else {
             if (!mp3->begin(file, out)) {
-                Serial.printf("[Core 0] Error: Could not start MP3 decoder for: %s\n", path.c_str());
                 xSemaphoreTake(nowPlayingMutex, portMAX_DELAY);
                 nowPlaying = "ERROR: Could not start MP3";
                 xSemaphoreGive(nowPlayingMutex);
-                if(file) delete file;
-                file = nullptr;
+                if(file) { delete file; file = nullptr; }
             } else {
-                 Serial.printf("[Core 0] Playback started for: %s\n", path.c_str());
                  xSemaphoreTake(nowPlayingMutex, portMAX_DELAY);
                  nowPlaying = localParam1;
                  xSemaphoreGive(nowPlayingMutex);
             }
         }
-      } else if (localCommand == CMD_STOP) {
-          Serial.printf("[Core 0] Processing STOP command.\n");
       } else if (localCommand == CMD_RENAME) {
-          // DEĞİŞİKLİK: Dosya yollarını /mp3 klasörünün içine ayarla
           String oldPath = "/mp3/" + localParam1;
           String newPath = "/mp3/" + localParam2;
-          Serial.printf("[Core 0] Processing RENAME command: from %s to %s\n", oldPath.c_str(), newPath.c_str());
           SD.rename(oldPath, newPath);
       } else if (localCommand == CMD_DELETE) {
-          // DEĞİŞİKLİK: Dosya yolunu /mp3 klasörünün içine ayarla
           String path = "/mp3/" + localParam1;
-          Serial.printf("[Core 0] Processing DELETE command for: %s\n", path.c_str());
           SD.remove(path);
       }
     }
-
     if (mp3 && mp3->isRunning()) {
       if (!mp3->loop()) {
         mp3->stop();
-        if (file) delete file;
-        file = nullptr;
+        if (file) { delete file; file = nullptr; }
         xSemaphoreTake(nowPlayingMutex, portMAX_DELAY);
         nowPlaying = "None";
         xSemaphoreGive(nowPlayingMutex);
-        Serial.printf("[Core 0] Playback finished.\n");
       }
     }
     vTaskDelay(10);
   }
 }
 
-void setup() {
-  Serial.begin(115200);
-  Serial.printf("Setup function running on core %d\n", xPortGetCoreID());
-
-  commandMutex = xSemaphoreCreateMutex();
-  nowPlayingMutex = xSemaphoreCreateMutex();
-
-  if (SD.begin(SD_CS)) {
-    sdCardInitialized = true;
-    Serial.println("SD Card (VSPI) initialized successfully.");
-    
-    // DEĞİŞİKLİK: /mp3 klasörü yoksa oluştur
-    if (!SD.exists("/mp3")) {
-      Serial.println("Creating /mp3 directory...");
-      if (SD.mkdir("/mp3")) {
-        Serial.println("Directory created.");
-      } else {
-        Serial.println("mkdir failed");
-      }
-    }
-
-  } else {
-    sdCardInitialized = false;
-    Serial.println("SD Card (VSPI) failed to initialize!");
-  }
-
-  out = new AudioOutputI2S();
-  out->SetPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
-  out->SetGain(1.0);
-  mp3 = new AudioGeneratorMP3();
-
-  xTaskCreatePinnedToCore(
-      AudioFileTask,
-      "AudioFile Task",
-      10000,
-      NULL,
-      2,
-      NULL,
-      0);
-
-  WiFi.begin(ssid, password);
-  Serial.printf("[Core %d] Connecting to Wi-Fi...\n", xPortGetCoreID());
-  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
-  Serial.printf("\n[Core %d] Connected successfully!\n", xPortGetCoreID());
-  Serial.printf("[Core %d] ESP32 IP Address: http://", xPortGetCoreID());
-  Serial.println(WiFi.localIP());
-
+void setupWebServer(){
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    Serial.printf("[Core 1] Handling GET request for /\n", xPortGetCoreID());
     String htmlPage = index_html;
     htmlPage.replace("%FILE_LIST%", listFiles());
     request->send(200, "text/html", htmlPage);
@@ -383,7 +309,6 @@ void setup() {
   
   server.on("/play", HTTP_GET, [](AsyncWebServerRequest *request){
     xSemaphoreTake(commandMutex, portMAX_DELAY);
-    Serial.printf("[Core 1] Received PLAY command for %s\n", request->getParam("file")->value().c_str());
     command = CMD_PLAY;
     commandParam1 = request->getParam("file")->value();
     xSemaphoreGive(commandMutex);
@@ -392,7 +317,6 @@ void setup() {
 
   server.on("/rename", HTTP_GET, [](AsyncWebServerRequest *request){
     xSemaphoreTake(commandMutex, portMAX_DELAY);
-    Serial.printf("[Core 1] Received RENAME command.\n");
     command = CMD_RENAME;
     commandParam1 = request->getParam("old")->value();
     commandParam2 = request->getParam("new")->value();
@@ -402,7 +326,6 @@ void setup() {
 
   server.on("/delete", HTTP_GET, [](AsyncWebServerRequest *request){
     xSemaphoreTake(commandMutex, portMAX_DELAY);
-    Serial.printf("[Core 1] Received DELETE command for %s\n", request->getParam("file")->value().c_str());
     command = CMD_DELETE;
     commandParam1 = request->getParam("file")->value();
     xSemaphoreGive(commandMutex);
@@ -411,14 +334,12 @@ void setup() {
 
   server.on("/stop", HTTP_GET, [](AsyncWebServerRequest *request){
     xSemaphoreTake(commandMutex, portMAX_DELAY);
-    Serial.printf("[Core 1] Received STOP command.\n");
     command = CMD_STOP;
     xSemaphoreGive(commandMutex);
     request->send(200);
   });
   
   server.on("/volume", HTTP_GET, [](AsyncWebServerRequest *request){
-    Serial.printf("[Core 1] Received VOLUME command.\n");
     if(request->hasParam("level")){
       out->SetGain(request->getParam("level")->value().toFloat());
     }
@@ -434,19 +355,46 @@ void setup() {
     } else {
       sdStatus = "Not Detected / Error";
     }
-    
     String nowPlayingCopy;
     xSemaphoreTake(nowPlayingMutex, portMAX_DELAY);
     nowPlayingCopy = nowPlaying;
     xSemaphoreGive(nowPlayingMutex);
-    
     request->send(200, "application/json", "{\"sd_status\":\"" + sdStatus + "\", \"now_playing\":\"" + nowPlayingCopy + "\"}");
   });
 
   server.begin();
-  Serial.printf("[Core 1] Web Server started.\n");
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  commandMutex = xSemaphoreCreateMutex();
+  nowPlayingMutex = xSemaphoreCreateMutex();
+
+  if (SD.begin(SD_CS)) {
+    sdCardInitialized = true;
+    if (!SD.exists("/mp3")) {
+      SD.mkdir("/mp3");
+    }
+  } else {
+    sdCardInitialized = false;
+  }
+
+  out = new AudioOutputI2S();
+  out->SetPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+  out->SetGain(1.0);
+  mp3 = new AudioGeneratorMP3();
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+  }
+  
+  setupWebServer();
+
+  xTaskCreatePinnedToCore(AudioFileTask, "AudioFile Task", 10000, NULL, 2, NULL, 0);
 }
 
 void loop() {
-  vTaskDelay(portMAX_DELAY);
+  vTaskDelay(1000);
 }
