@@ -4,29 +4,38 @@
 #include <WiFi.h>
 #include <map>
 
-// --- Nota Frekansları ---
-// Bu blok, müzik notalarını frekans değerlerine çevirir.
-#define NOTE_C4  140
-#define NOTE_E4  700
-#define NOTE_G4  400
-#define NOTE_C5  1200
+// --- Genişletilmiş Nota Frekansları ---
+#define NOTE_C4  1700
+#define NOTE_D4  2600
+#define NOTE_E4  2600
+#define NOTE_F4  5000
+#define NOTE_G4  2600
+#define NOTE_A4  2600
+#define NOTE_B4  2600
+#define NOTE_C5  2600
+#define NOTE_D5  2600
+#define NOTE_E5  2600
+#define NOTE_F5  2600
+#define NOTE_G5  2600
+#define NOTE_A5  2600
+#define NOTE_B5  2600
 #define NOTE_G3  2600
 
 // --- İkinci SPI hattı için nesne ---
 SPIClass hspi(HSPI);
 
 // --- WiFi Configuration ---
-const char* ssid = "Ents_Test";     // Kendi WiFi ağınızın adını buraya girin
-const char* password = "12345678"; // Kendi WiFi şifrenizi buraya girin
+const char* ssid = "Ents_Test";
+const char* password = "12345678";
 
 // --- Time Configuration (NTP) ---
 const char* ntpServer = "pool.ntp.org";
-const long  gmtOffset_sec = 10800; // Türkiye için GMT+3 (3600 * 3)
-const int   daylightOffset_sec = 0;   // Yaz saati uygulaması yoksa 0
+const long  gmtOffset_sec = 10800;
+const int   daylightOffset_sec = 0;
 
 // --- Pin Tanımlamaları ---
-#define BUZZER_PIN 32                   // Buzzer'ın bağlı olduğu pin
-#define CARD_COOLDOWN_SECONDS 5         // Kartın tekrar okunabilmesi için geçmesi gereken süre (saniye)
+#define BUZZER_PIN 32
+#define CARD_COOLDOWN_SECONDS 5
 
 // --- RFID Reader (Tek Okuyucu) ---
 #define RST_PIN   22
@@ -44,14 +53,14 @@ MFRC522 rfid(SS_PIN, RST_PIN);
 #define LOG_FILE "/activity_log.txt"
 
 // --- Veritabanları ---
-std::map<String, String> userDatabase;        // UID -> İsim
-std::map<String, bool> userStatus;            // UID -> Durum (true: İçeride, false: Dışarıda)
-std::map<String, unsigned long> lastScanTime; // UID -> Son Okunma Zamanı (cooldown için)
+std::map<String, String> userDatabase;
+std::map<String, bool> userStatus;
+std::map<String, unsigned long> lastScanTime;
 
 
 void setup() {
   Serial.begin(115200);
-  pinMode(BUZZER_PIN, OUTPUT); // Buzzer pinini çıkış olarak ayarla
+  pinMode(BUZZER_PIN, OUTPUT);
 
   Serial.println("\n-- Tek Okuyuculu Akıllı Geçiş Sistemi --");
   
@@ -63,7 +72,7 @@ void setup() {
   
   Serial.print("Initializing SD card...");
   if (!SD.begin(SD_CS_PIN, hspi)) {
-    Serial.println(" Card Mount Failed! Check your wiring, SD card formatting (FAT32) or the card itself.");
+    Serial.println(" Card Mount Failed!");
     while (1);
   }
   Serial.println(" SD card initialized.");
@@ -77,86 +86,68 @@ void setup() {
 }
 
 void loop() {
-  // Yeni bir kart var mı ve okunabildi mi?
   if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
     String uid = getUIDString(rfid.uid);
     
-    // Cooldown kontrolü: Aynı kart çok sık mı okunuyor?
     if (lastScanTime.count(uid) && (millis() - lastScanTime[uid] < CARD_COOLDOWN_SECONDS * 1000)) {
         rfid.PICC_HaltA();
         return; 
     }
     
-    // Kullanıcıyı veritabanından bul
     String name = getUserName(uid);
     
     if (name == "Unknown User") {
-      // --- KULLANICI TANINMIYOR ---
       logActivityToSd("INVALID", uid, name);
       playBuzzer(2); // Hata melodisi çal
     } else {
-      // --- KULLANICI TANINIYOR ---
       bool isCurrentlyIn = userStatus[uid];
-
       if (!isCurrentlyIn) {
-        // ---- KULLANICI GİRİŞ YAPIYOR (ENTER) ----
         logActivityToSd("ENTER", uid, name);
         playBuzzer(1); // Giriş melodisi çal
-        userStatus[uid] = true; // Durumu "içeride" olarak güncelle
+        userStatus[uid] = true;
       } else {
-        // ---- KULLANICI ÇIKIŞ YAPIYOR (EXIT) ----
         logActivityToSd("EXIT", uid, name);
         playBuzzer(0); // Çıkış melodisi çal
-        userStatus[uid] = false; // Durumu "dışarıda" olarak güncelle
+        userStatus[uid] = false;
       }
     }
-
-    // Bu kartın son okunma zamanını kaydet
     lastScanTime[uid] = millis();
-    
     rfid.PICC_HaltA();
     rfid.PCD_StopCrypto1();
   }
 }
 
-// isEnter yerine durum parametresi (0:Çıkış, 1:Giriş, 2:Hata)
-void playBuzzer(int status) {
-  int noteDuration = 200; 
-  int pauseBetweenNotes = 50; 
 
-  if (status == 1) { // Giriş durumu
-    // Yükselen C-major arpej (Başarı tonu)
-    tone(BUZZER_PIN, NOTE_C4, noteDuration);
-    delay(noteDuration + pauseBetweenNotes);
-    tone(BUZZER_PIN, NOTE_E4, noteDuration);
-    delay(noteDuration + pauseBetweenNotes);
-    tone(BUZZER_PIN, NOTE_G4, noteDuration);
-    delay(noteDuration + pauseBetweenNotes);
-    tone(BUZZER_PIN, NOTE_C5, noteDuration * 2); // Son nota daha uzun
-  } else if (status == 0) { // Çıkış durumu
-    // Alçalan C-major arpej (Bitiş tonu)
-    tone(BUZZER_PIN, NOTE_C5, noteDuration);
-    delay(noteDuration + pauseBetweenNotes);
-    tone(BUZZER_PIN, NOTE_G4, noteDuration);
-    delay(noteDuration + pauseBetweenNotes);
-    tone(BUZZER_PIN, NOTE_C4, noteDuration * 2); // Son nota daha uzun
-  } else if (status == 2) { // Hata durumu
-    // Düşük ve yavaş "yanlış" tonu
-    tone(BUZZER_PIN, NOTE_G3, 800); // 800ms boyunca düşük bir ton
+void playBuzzer(int status) {
+  if (status == 1) { 
+    tone(BUZZER_PIN, NOTE_B4, 150);
+    delay(180);
+    tone(BUZZER_PIN, NOTE_D5, 400);
+  } else if (status == 0) { 
+    tone(BUZZER_PIN, NOTE_G4, 150); 
+    delay(180);
+    tone(BUZZER_PIN, NOTE_C4, 400);
+  } else if (status == 2) { 
+    for (int i = 0; i < 5; i++) { 
+      tone(BUZZER_PIN, NOTE_A5, 100); 
+      delay(120);                    
+      tone(BUZZER_PIN, NOTE_G5, 100); 
+      delay(120);                    
+    }
   }
 }
 
 void loadUsersFromSd() {
   File file = SD.open(USER_DATABASE_FILE);
   if (!file) {
-    Serial.println("Failed to open users.csv from SD card. Make sure the file exists on the SD card root.");
+    Serial.println("Failed to open users.csv from SD card.");
     return;
   }
   Serial.println("Loading users from SD card:");
   while (file.available()) {
     String line = file.readStringUntil('\n');
     line.trim();
-    if (line.length() == 0) continue; // Skip empty lines
+    if (line.length() == 0) continue;
     int commaIndex = line.indexOf(',');
     if (commaIndex != -1) {
       String uid = line.substring(0, commaIndex);
