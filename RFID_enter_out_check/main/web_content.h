@@ -1,5 +1,7 @@
-// This file contains all web content and handlers for the stylish UI.
-#include <ArduinoJson.h>
+// Bu dosya, RAM'den tasarruf etmek için tüm web içeriğini PROGMEM'de saklar.
+
+#include <ArduinoJson.h> // Hatanın çözümü için bu kütüphane buraya eklendi.
+
 // --- PROGMEM Strings for CSS and Main Page HTML ---
 const char PAGE_CSS[] PROGMEM = R"rawliteral(
 body { 
@@ -39,7 +41,6 @@ th { background-color: #03dac6; color: #121212; font-weight: 700; }
 form { margin-top: 30px; padding: 20px; border: 1px solid #333; border-radius: 8px; background-color: #2c2c2c; }
 input[type=text] { width: calc(50% - 10px); padding: 10px; margin: 5px; border-radius: 4px; border: 1px solid #555; background: #333; color: #e0e0e0; }
 input[type=submit] { padding: 10px 20px; border: none; border-radius: 4px; background: #03dac6; color: #121212; font-weight: bold; cursor: pointer; }
-input[type=submit]:hover { background: #018786; }
 .btn-delete { color: #cf6679; text-decoration: none; font-weight: bold; }
 .home-link { margin-bottom: 20px; display: inline-block; color: #bb86fc; }
 .status { padding: 5px 10px; border-radius: 15px; font-size: 0.85em; text-align: center; color: white; font-weight: bold; }
@@ -74,7 +75,7 @@ function fetchData() { fetch('/data').then(response => response.json()).then(dat
     });
 }
 setInterval(updateTime, 1000);
-setInterval(fetchData, 1000); // Daha hızlı güncelleme için 1 saniyeye düşürüldü
+setInterval(fetchData, 1000);
 window.onload = () => { updateTime(); fetchData(); };
 </script>
 </body>
@@ -100,15 +101,17 @@ void handleData() {
 void handleAdmin() {
   if (!server.authenticate(ADMIN_USER, ADMIN_PASS)) return server.requestAuthentication();
   String html = "<html><head><title>Admin Panel</title><meta charset='UTF-8'><link href='/style.css' rel='stylesheet' type='text/css'></head><body><div class='container'>";
-  html += "<h1>User Management</h1><a href='/' class='home-link'>&larr; Back to Dashboard</a>";
-  html += "<table><tr><th>UID</th><th>Name</th><th>Current Status</th><th>Action</th></tr>";
+  html += "<h1>User Management</h1><a href='/' class='home-link'>&larr; Back to Dashboard</a> | <a href='/logs'>View Logs</a>";
+  html += "<table style='margin-top:20px;'><tr><th>UID</th><th>Name</th><th>Current Status</th><th>Action</th></tr>";
   for (auto const& [uid, name] : userDatabase) {
     html += "<tr><td>" + uid + "</td><td>" + name + "</td><td>" + (userStatus[uid] ? "<span class='status status-in'>INSIDE</span>" : "<span class='status status-out'>OUTSIDE</span>") + "</td>";
-    html += "<td><a href='/deleteuser?uid=" + uid + "' class='btn-delete' onclick='return confirm(\"Are you sure you want to delete user: "+name+"?\");'>Delete</a></td></tr>";
+    html += "<td><a href='/deleteuser?uid=" + uid + "' onclick='return confirm(\"Delete this user?\");'>Delete</a></td></tr>";
   }
   html += "</table>";
-  html += "<h2>Add New User</h2><form action='/adduser' method='post'>Card UID: <input type='text' name='uid' required><br>Name: <input type='text' name='name' required><br><br><input type='submit' value='Add User'></form>";
-  html += "</div></body></html>";
+  html += "<h2>Add New User</h2><form action='/adduser' method='post'>"
+          "Card UID: <input type='text' name='uid' required><br>"
+          "Name: <input type='text' name='name' required><br><br>"
+          "<input type='submit' value='Add User'></form></body></html>";
   server.send(200, "text/html", html);
 }
 
@@ -116,22 +119,23 @@ void handleLogs() {
   if (!server.authenticate(ADMIN_USER, ADMIN_PASS)) return server.requestAuthentication();
   String html = "<html><head><title>Activity Logs</title><meta charset='UTF-8'><link href='/style.css' rel='stylesheet' type='text/css'></head><body><div class='container'>";
   html += "<h1>Activity Logs</h1><a href='/' class='home-link'>&larr; Back to Dashboard</a>";
+  
   struct tm timeinfo;
   if(!getLocalTime(&timeinfo)){
-    html += "<h3>Error</h3><p>Could not obtain time to find today's log file.</p>";
+    html += "<h3>Error: Could not get time to find log file.</h3>";
   } else {
     char logFilePath[40];
     strftime(logFilePath, sizeof(logFilePath), "/logs/%Y/%m/%d.csv", &timeinfo);
     File file = SD.open(logFilePath);
     if(file && file.size() > 0){
-      html += "<h3>Daily Summary</h3><table><tr><th>Name</th><th>Total Time Inside</th></tr>";
+      html += "<h3>Daily Summary</h3><table style='width:50%;'><tr><th>Name</th><th>Total Time Inside</th></tr>";
       std::map<String, unsigned long> dailyTotals;
       file.seek(0);
       if(file.available()) file.readStringUntil('\n');
       while(file.available()){
         String line = file.readStringUntil('\n'); line.trim();
         if(line.length() > 0 && line.indexOf("EXIT") != -1) {
-          String name, duration_s;
+          String name = ""; String duration_s = "0";
           int commaCount = 0; int lastIdx = -1;
           for(int i=0; i<4; i++){ lastIdx = line.indexOf(',', lastIdx+1); }
           name = line.substring(line.lastIndexOf(',', lastIdx-1)+1, lastIdx);
@@ -139,7 +143,7 @@ void handleLogs() {
           dailyTotals[name] += duration_s.toInt();
         }
       }
-      if(dailyTotals.empty()){
+       if(dailyTotals.empty()){
          html += "<tr><td colspan='2'>No completed sessions for today.</td></tr>";
       } else {
         for (auto const& [name, totalDuration] : dailyTotals) {
@@ -147,6 +151,7 @@ void handleLogs() {
         }
       }
       html += "</table>";
+
       html += "<h3>Detailed Log</h3><table><tr><th>Time</th><th>Action</th><th>UID</th><th>Name</th><th>Duration</th></tr>";
       file.seek(0);
       if(file.available()) file.readStringUntil('\n');
@@ -165,10 +170,10 @@ void handleLogs() {
       }
       file.close();
     } else {
-      html += "<h3>Logs</h3><p>No log entries found for today.</p>";
+      html += "<h3>No log file for today.</h3>";
     }
   }
-  html += "</div></body></html>";
+  html += "</body></html>";
   server.send(200, "text/html", html);
 }
 
@@ -210,5 +215,5 @@ void handleNotFound() {
   server.send(404, "text/plain", "404: Not Found");
 }
 
-// These handlers are not used in this version but are declared.
+// These handlers are not used in this version but are declared for completeness.
 void handleStatus() {}
