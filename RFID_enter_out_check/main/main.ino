@@ -16,13 +16,8 @@ TaskHandle_t Task_Network_Handle;
 TaskHandle_t Task_RFID_Handle;
 SemaphoreHandle_t sdMutex;
 
-#define NOTE_C4  2620
-#define NOTE_G4  3920
-#define NOTE_B4  4940
-#define NOTE_D5  5870
-#define NOTE_F4  3490
-#define NOTE_G5  7840
-#define NOTE_A5  8800
+#define BEEP_FREQUENCY 2600
+
 
 SPIClass hspi(HSPI);
 
@@ -469,9 +464,25 @@ void checkForDailyReset() {
 }
 
 void playBuzzer(int status) {
-  if (status == 1) { tone(BUZZER_PIN, NOTE_B4, 150); delay(180); tone(BUZZER_PIN, NOTE_D5, 400); } 
-  else if (status == 0) { tone(BUZZER_PIN, NOTE_G4, 150); delay(180); tone(BUZZER_PIN, NOTE_C4, 400); } 
-  else if (status == 2) { for (int i = 0; i < 5; i++) { tone(BUZZER_PIN, NOTE_A5, 100); delay(120); tone(BUZZER_PIN, NOTE_G5, 100); delay(120); } }
+
+
+  if (status == 1) { 
+    tone(BUZZER_PIN, BEEP_FREQUENCY, 150); 
+    delay(180);
+    tone(BUZZER_PIN, BEEP_FREQUENCY, 400); 
+  } 
+  else if (status == 0) { 
+    tone(BUZZER_PIN, BEEP_FREQUENCY, 100); 
+    delay(120);
+    tone(BUZZER_PIN, BEEP_FREQUENCY, 100); 
+    delay(120);
+    tone(BUZZER_PIN, BEEP_FREQUENCY, 100);
+  } 
+  else if (status == 2) { 
+    tone(BUZZER_PIN, BEEP_FREQUENCY, 1000); 
+    delay(1100); 
+    tone(BUZZER_PIN, BEEP_FREQUENCY, 1000);
+  }
 }
 
 void loadUsersFromSd() {
