@@ -66,7 +66,7 @@ unsigned long lastCardActivityTime = 0;
 #define G_SHEETS_SENDING_FILE "/upload_sending.csv"
 #define TEMP_USER_FILE        "/temp_users.csv"
 const char* GOOGLE_SCRIPT_ID = "https://script.google.com/macros/s/AKfycby1vGdWeMxtKsf0mf4i98NEv_NmrrHkRSRZ5-IMXtgSmRvFoyPZToPoie28pv-td8SnkQ/exec";
-#define UPLOAD_INTERVAL_MS 120000 // 2mins
+#define UPLOAD_INTERVAL_MS 60000 // 1min
 
 MFRC522 rfid(SS_PIN, RST_PIN);
 WebServer server(80);
