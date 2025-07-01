@@ -1,5 +1,41 @@
 #pragma once
 
+const char PAGE_WiFi_Portal[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <title>RFID WiFi Setup</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: Arial, sans-serif; background-color: #282c34; color: #fff; text-align: center; padding-top: 50px; }
+    .container { background: #3c4049; padding: 20px 30px; border-radius: 12px; display: inline-block; min-width: 300px; }
+    h1 { color: #61dafb; }
+    input[type=text], input[type=password] { width: 90%; padding: 12px; margin: 8px 0; border-radius: 4px; border: 1px solid #555; background: #2f333a; color: #fff; }
+    input[type=submit] { width: 95%; padding: 14px 20px; border: none; border-radius: 4px; background: #61dafb; color: #282c34; font-weight: bold; cursor: pointer; font-size: 16px; }
+    .msg { background: #4caf50; color: white; padding: 10px; margin-top: 15px; border-radius: 5px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>RFID System WiFi Setup</h1>
+    <p>Please enter your WiFi credentials to connect the device to the internet.</p>
+    <form action="/savewifi" method="post">
+      <input type="text" name="ssid" placeholder="WiFi Network Name (SSID)" required><br>
+      <input type="password" name="password" placeholder="WiFi Password"><br><br>
+      <input type="submit" value="Save and Connect">
+    </form>
+    <div id="msg-box"></div>
+  </div>
+<script>
+  const form = document.querySelector('form');
+  form.addEventListener('submit', e => {
+    document.getElementById('msg-box').innerHTML = '<p class="msg">Saving credentials... The device will reboot.</p>';
+  });
+</script>
+</body>
+</html>
+)rawliteral";
+
 const char PAGE_CSS[] PROGMEM = R"rawliteral(
 body { 
   font-family: 'Roboto', sans-serif; 
@@ -133,283 +169,3 @@ const char PAGE_Update[] PROGMEM = R"rawliteral(
   <p>Update may take a few minutes. The device will reboot automatically after a successful update.</p>
 </div></body></html>
 )rawliteral";
-
-void handleRoot() { server.send_P(200, "text/html", PAGE_Main); }
-void handleCSS() { server.send_P(200, "text/css", PAGE_CSS); }
-
-void handleData() {
-  StaticJsonDocument<256> doc;
-  doc["time"] = lastEventTime;
-  doc["uid"] = lastEventUID;
-  doc["name"] = lastEventName;
-  doc["action"] = lastEventAction;
-  String json;
-  serializeJson(doc, json);
-  server.send(200, "application/json", json);
-}
-
-void handleAddUserPage() {
-  if (!server.authenticate(ADD_USER_AUTH_USER, ADD_USER_PASS.c_str())) { return server.requestAuthentication(); }
-  server.send_P(200, "text/html", PAGE_AddUser);
-}
-
-void handleGetLastUID() {
-  server.send(200, "text/plain", lastEventUID);
-}
-
-void handleReboot() {
-  if (!server.authenticate(ADMIN_USER.c_str(), ADMIN_PASS.c_str())) return;
-  server.send(200, "text/plain", "Rebooting in 3 seconds...");
-  delay(3000);
-  ESP.restart();
-}
-
-void handleChangePassword() {
-  if (!server.authenticate(ADMIN_USER.c_str(), ADMIN_PASS.c_str())) return;
-  if (server.hasArg("newpass")) {
-    String newPass = server.arg("newpass");
-    newPass.trim();
-    if (newPass.length() > 3 && newPass.length() < 32) {
-      writeStringToEEPROM(0, newPass);
-      ADMIN_PASS = newPass;
-      server.send(200, "text/plain", "Admin password changed successfully.");
-    } else {
-      server.send(400, "text/plain", "Password must be between 4 and 31 characters.");
-    }
-  } else {
-    server.send(400, "text/plain", "No new password provided.");
-  }
-}
-
-void handleChangeAddUserPassword() {
-  if (!server.authenticate(ADMIN_USER.c_str(), ADMIN_PASS.c_str())) return;
-  if (server.hasArg("newpass")) {
-    String newPass = server.arg("newpass");
-    newPass.trim();
-    if (newPass.length() > 2 && newPass.length() < 32) {
-      writeStringToEEPROM(32, newPass);
-      ADD_USER_PASS = newPass;
-      server.send(200, "text/plain", "'Add User' password changed successfully.");
-    } else {
-      server.send(400, "text/plain", "Password must be between 3 and 31 characters.");
-    }
-  } else {
-    server.send(400, "text/plain", "No new password provided.");
-  }
-}
-
-void listFiles(String& html, const char* dirname, int levels) {
-    File root = SD.open(dirname);
-    if (!root || !root.isDirectory()) return;
-    File file = root.openNextFile();
-    while (file) {
-        if (file.isDirectory()) {
-            if (levels) listFiles(html, file.path(), levels - 1);
-        } else {
-            String filePath = String(file.path());
-            html += "<tr><td>" + filePath + "</td><td>" + String(file.size()) + " B</td>";
-            html += "<td><a href='/download?file=" + filePath + "' class='btn-download'>Download</a></td></tr>";
-        }
-        file = root.openNextFile();
-    }
-}
-
-void handleFileDownload() {
-    if (!server.authenticate(ADMIN_USER.c_str(), ADMIN_PASS.c_str())) return;
-    if (server.hasArg("file")) {
-        String path = server.arg("file");
-        if (path.indexOf("..") != -1 || !path.startsWith("/")) {
-            server.send(400, "text/plain", "Invalid file path.");
-            return;
-        }
-        
-        String filename;
-        int lastSlash = path.lastIndexOf('/');
-        if (lastSlash != -1) {
-            filename = path.substring(lastSlash + 1);
-        } else {
-            filename = path;
-        }
-
-        xSemaphoreTake(sdMutex, portMAX_DELAY);
-        File file = SD.open(path, FILE_READ);
-        xSemaphoreGive(sdMutex);
-        
-        if (file) {
-            server.sendHeader("Content-Disposition", "attachment; filename=\"" + filename + "\"");
-            server.streamFile(file, "application/octet-stream");
-            file.close();
-        } else {
-            server.send(404, "text/plain", "File not found.");
-        }
-    } else {
-        server.send(400, "text/plain", "File parameter missing.");
-    }
-}
-
-void handleUpdate() {
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/plain", (Update.hasError()) ? "UPDATE FAIL" : "UPDATE OK. Rebooting...");
-    ESP.restart();
-}
-
-void handleUpdateUpload() {
-    HTTPUpload& upload = server.upload();
-    if (upload.status == UPLOAD_FILE_START) {
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
-    } else if (upload.status == UPLOAD_FILE_WRITE) {
-        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) Update.printError(Serial);
-    } else if (upload.status == UPLOAD_FILE_END) {
-        if (!Update.end(true)) Update.printError(Serial);
-    }
-}
-
-void handleAdmin() {
-  if (!server.authenticate(ADMIN_USER.c_str(), ADMIN_PASS.c_str())) { return server.requestAuthentication(); }
-  String html = "<html><head><title>Admin Panel</title><meta charset='UTF-8'><link href='/style.css' rel='stylesheet' type='text/css'></head><body><div class='container'>";
-  html += "<h1>Admin Panel</h1><a href='/' class='home-link'>&larr; Back to Dashboard</a>";
-  
-  html += "<h2>Security Settings</h2>";
-  html += "<h3>Admin Password</h3>";
-  html += "<form action='/changepass' method='post'>New Admin Password: <input type='password' name='newpass' required><br><input type='submit' value='Change'></form>";
-  html += "<h3>'Add User' Page Password (user: user)</h3>";
-  html += "<form action='/changeadduserpass' method='post'>New 'Add User' Password: <input type='password' name='newpass' required><br><input type='submit' value='Change'></form>";
-  
-  html += "<h2>User Management</h2>";
-  html += "<table><tr><th>UID</th><th>Name</th><th>Current Status</th><th>Action</th></tr>";
-  for (auto const& [uid, name] : userDatabase) {
-    html += "<tr><td>" + uid + "</td><td>" + name + "</td><td>" + (userStatus[uid] ? "<span class='status status-in'>INSIDE</span>" : "<span class='status status-out'>OUTSIDE</span>") + "</td>";
-    html += "<td><a href='/deleteuser?uid=" + uid + "' class='btn-delete' onclick='return confirm(\"Are you sure?\");'>Delete</a></td></tr>";
-  }
-  html += "</table>";
-  
-  html += "<h2>Device Management</h2>";
-  html += "<form action='/reboot' method='post' onsubmit='return confirm(\"Reboot the device?\");'><button class='btn-reboot'>Reboot Device</button></form>";
-  
-  html += "<h2>Firmware Update</h2>";
-  html += "<p>Update firmware via OTA. Upload a .bin file.</p>";
-  html += "<form action='/update' method='get'><button>Go to Update Page</button></form>";
-  
-  html += "<h2>SD Card File Manager</h2>";
-  html += "<table><tr><th>File Path</th><th>Size</th><th>Action</th></tr>";
-  xSemaphoreTake(sdMutex, portMAX_DELAY);
-  listFiles(html, "/", 0);
-  listFiles(html, LOGS_DIRECTORY, 2);
-  xSemaphoreGive(sdMutex);
-  html += "</table>";
-
-  html += "</div></body></html>";
-  server.send(200, "text/html", html);
-}
-
-void handleLogs() {
-  if (!server.authenticate(ADMIN_USER.c_str(), ADMIN_PASS.c_str())) { return server.requestAuthentication(); }
-  String html = "<html><head><title>Activity Logs</title><meta charset='UTF-8'><link href='/style.css' rel='stylesheet' type='text/css'></head><body><div class='container'>";
-  html += "<h1>Activity Logs</h1><a href='/' class='home-link'>&larr; Back to Dashboard</a>";
-  struct tm timeinfo;
-  if(!getLocalTime(&timeinfo)){ html += "<h3>Error: Could not get time.</h3>"; }
-  else {
-    char logFilePath[40];
-    strftime(logFilePath, sizeof(logFilePath), "/logs/%Y/%m/%d.csv", &timeinfo);
-    xSemaphoreTake(sdMutex, portMAX_DELAY);
-    File file = SD.open(logFilePath);
-    xSemaphoreGive(sdMutex);
-    if(file && file.size() > 0){
-      html += "<h3>Daily Summary</h3><table style='width:50%;'><tr><th>Name</th><th>Total Time Inside</th></tr>";
-      std::map<String, unsigned long> dailyTotals;
-      xSemaphoreTake(sdMutex, portMAX_DELAY);
-      file.seek(0);
-      if(file.available()) file.readStringUntil('\n');
-      while(file.available()){
-        String line = file.readStringUntil('\n'); line.trim();
-        if(line.length() > 0 && line.indexOf("EXIT") != -1) {
-          String name = ""; String duration_s = "0";
-          int lastIdx = -1;
-          for(int i=0; i<4; i++){ lastIdx = line.indexOf(',', lastIdx+1); }
-          name = line.substring(line.lastIndexOf(',', lastIdx-1)+1, lastIdx);
-          duration_s = line.substring(lastIdx+1, line.indexOf(',', lastIdx+1));
-          dailyTotals[name] += duration_s.toInt();
-        }
-      }
-      xSemaphoreGive(sdMutex);
-      if(dailyTotals.empty()){ html += "<tr><td colspan='2'>No completed sessions for today.</td></tr>"; }
-      else { for (auto const& [name, totalDuration] : dailyTotals) { html += "<tr><td>" + name + "</td><td>" + formatDuration(totalDuration) + "</td></tr>"; } }
-      html += "</table>";
-      html += "<h3>Detailed Log</h3><table><tr><th>Time</th><th>Action</th><th>UID</th><th>Name</th><th>Duration</th></tr>";
-      xSemaphoreTake(sdMutex, portMAX_DELAY);
-      file.seek(0);
-      if(file.available()) file.readStringUntil('\n');
-      while(file.available()){
-        String line = file.readStringUntil('\n'); line.trim();
-        if(line.length() > 0){
-          String part[6]; int lastIndex = -1;
-          for(int i=0; i<5; i++){
-            int commaIndex = line.indexOf(',', lastIndex+1);
-            if(commaIndex == -1) { part[i] = line.substring(lastIndex+1); break; }
-            part[i] = line.substring(lastIndex+1, commaIndex); lastIndex = commaIndex;
-          }
-          if (lastIndex != -1 && lastIndex < (int)line.length() - 1) part[5] = line.substring(lastIndex + 1); else part[5] = "-";
-          html += "<tr><td>" + part[0] + "</td><td>" + part[1] + "</td><td>" + part[2] + "</td><td>" + part[3] + "</td><td>" + part[5] + "</td></tr>";
-        }
-      }
-      file.close();
-      xSemaphoreGive(sdMutex);
-    } else { html += "<h3>No log file for today.</h3>"; }
-  }
-  html += "</div></body></html>";
-  server.send(200, "text/html", html);
-}
-
-void handleDeleteUser() {
-  if (!server.authenticate(ADMIN_USER.c_str(), ADMIN_PASS.c_str())) return;
-  if (server.hasArg("uid")) {
-    String uidToDelete = server.arg("uid");
-    xSemaphoreTake(sdMutex, portMAX_DELAY);
-    userStatus.erase(uidToDelete);
-    entryTime.erase(uidToDelete);
-    File originalFile = SD.open(USER_DATABASE_FILE, FILE_READ);
-    File tempFile = SD.open(TEMP_USER_FILE, FILE_WRITE);
-    if (!originalFile || !tempFile) {
-      xSemaphoreGive(sdMutex);
-      server.send(500, "text/plain", "File error.");
-      return;
-    }
-    while (originalFile.available()) {
-      String line = originalFile.readStringUntil('\n'); line.trim();
-      if (line.length() > 0 && !line.startsWith(uidToDelete + ",")) { tempFile.println(line); }
-    }
-    originalFile.close();
-    tempFile.close();
-    SD.remove(USER_DATABASE_FILE);
-    SD.rename(TEMP_USER_FILE, USER_DATABASE_FILE);
-    xSemaphoreGive(sdMutex);
-    loadUsersFromSd();
-    syncUserListToSheets();
-  }
-  server.sendHeader("Location", "/admin", true);
-  server.send(302, "text/plain", "");
-}
-
-void handleAddUser() {
-  if (!server.authenticate(ADD_USER_AUTH_USER, ADD_USER_PASS.c_str())) return;
-  if (server.hasArg("uid") && server.hasArg("name")) {
-    String uid = server.arg("uid"); String name = server.arg("name");
-    uid.trim(); name.trim();
-    xSemaphoreTake(sdMutex, portMAX_DELAY);
-    File file = SD.open(USER_DATABASE_FILE, FILE_APPEND);
-    if (file) {
-      file.println(uid + "," + name);
-      file.close();
-      xSemaphoreGive(sdMutex);
-      loadUsersFromSd();
-      syncUserListToSheets();
-    } else {
-      xSemaphoreGive(sdMutex);
-    }
-  }
-  server.sendHeader("Location", "/admin", true);
-  server.send(302, "text/plain", "");
-}
-
-void handleNotFound() { server.send(404, "text/plain", "404: Not Found"); }
-void handleStatus() {}
