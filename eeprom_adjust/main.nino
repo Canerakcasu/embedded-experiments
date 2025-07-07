@@ -1,0 +1,220 @@
+//=========================================================
+// LIBRARIES
+//=========================================================
+#include <WiFi.h>
+#include <WebServer.h>
+#include <EEPROM.h>
+
+//=========================================================
+// EEPROM SETTINGS (AS PER YOUR IMAGE)
+//=========================================================
+#define EEPROM_SIZE 512 // Increased size for all settings
+
+// Each setting gets a 60-byte slot
+#define EEPROM_WIFI_SSID_ADDR           0
+#define EEPROM_WIFI_PASS_ADDR          60
+#define EEPROM_ADMIN_USER_ADDR         120
+#define EEPROM_ADMIN_PASS_ADDR         180
+#define EEPROM_ADD_USER_USER_ADDR      240
+#define EEPROM_ADD_USER_PASS_ADDR      300
+
+//=========================================================
+// GLOBAL CONFIGURATION VARIABLES
+//=========================================================
+String wifi_ssid;
+String wifi_pass;
+String admin_user;
+String admin_pass;
+String add_user_user;
+String add_user_pass;
+
+const char* ap_ssid = "RFID-Config-Portal";
+WebServer server(80);
+
+//=========================================================
+// FORWARD DECLARATIONS
+//=========================================================
+void handleRoot();
+void handleAdmin();
+void handleSave();
+void writeStringToEEPROM(int addr, const String& str);
+String readStringFromEEPROM(int addr, int maxLen);
+
+//=========================================================
+// SETUP - All configuration is loaded here once
+//=========================================================
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("\n--- New Architecture Test ---");
+
+  EEPROM.begin(EEPROM_SIZE);
+
+  // Read all settings from EEPROM into global variables
+  wifi_ssid       = readStringFromEEPROM(EEPROM_WIFI_SSID_ADDR, 32);
+  wifi_pass       = readStringFromEEPROM(EEPROM_WIFI_PASS_ADDR, 63);
+  admin_user      = readStringFromEEPROM(EEPROM_ADMIN_USER_ADDR, 60);
+  admin_pass      = readStringFromEEPROM(EEPROM_ADMIN_PASS_ADDR, 60);
+  add_user_user   = readStringFromEEPROM(EEPROM_ADD_USER_USER_ADDR, 60);
+  add_user_pass   = readStringFromEEPROM(EEPROM_ADD_USER_PASS_ADDR, 60);
+
+  // If a setting is empty in EEPROM, set a default value
+  if (admin_user.length() == 0) admin_user = "admin";
+  if (admin_pass.length() == 0) admin_pass = ""; // No password by default
+  if (add_user_user.length() == 0) add_user_user = "user";
+  if (add_user_pass.length() == 0) add_user_pass = ""; // No password by default
+
+  // Print the loaded values to Serial Monitor for confirmation
+  Serial.println("--- Configuration Loaded at Boot ---");
+  Serial.printf("WiFi SSID: '%s'\n", wifi_ssid.c_str());
+  Serial.printf("WiFi Pass: '%s'\n", wifi_pass.c_str());
+  Serial.printf("Admin User: '%s'\n", admin_user.c_str());
+  Serial.printf("Admin Pass: '%s'\n", admin_pass.c_str());
+  Serial.printf("Add User User: '%s'\n", add_user_user.c_str());
+  Serial.printf("Add User Pass: '%s'\n", add_user_pass.c_str());
+  Serial.println("------------------------------------");
+  
+  // Decide to start in AP mode or connect to WiFi
+  if (wifi_ssid.length() == 0) {
+    Serial.println("No WiFi config found. Starting AP mode...");
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(ap_ssid);
+    IPAddress apIP = WiFi.softAPIP();
+    Serial.print("AP IP address: ");
+    Serial.println(apIP);
+
+    server.on("/", HTTP_GET, [](){
+      String html = "<h1>WiFi Setup</h1><form method='POST' action='/save'>";
+      html += "SSID: <input type='text' name='ssid'><br>";
+      html += "Password: <input type='password' name='pass'><br>";
+      html += "<input type='submit' value='Save and Restart'></form>";
+      server.send(200, "text/html", html);
+    });
+    server.on("/save", HTTP_POST, handleSave);
+  } else {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
+    Serial.print("Connecting to WiFi...");
+    int attempts = 0;
+    while(WiFi.status() != WL_CONNECTED && attempts < 30) {
+      delay(500);
+      Serial.print(".");
+      attempts++;
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\nWiFi Connected!");
+      Serial.print("IP Address: ");
+      Serial.println(WiFi.localIP());
+      server.on("/", HTTP_GET, handleRoot);
+      server.on("/admin", HTTP_GET, handleAdmin);
+      server.on("/save", HTTP_POST, handleSave);
+    } else {
+      Serial.println("\nCould not connect. Please reset to enter AP mode.");
+    }
+  }
+  
+  server.begin();
+}
+
+//=========================================================
+// MAIN LOOP
+//=========================================================
+void loop() {
+  server.handleClient();
+}
+
+//=========================================================
+// WEB HANDLERS
+//=========================================================
+void handleRoot(){
+  server.send(200, "text/html", "<h1>Main Page</h1><p>Welcome!</p><a href='/admin'>Admin Panel</a>");
+}
+
+void handleAdmin(){
+  // Authentication now uses the global variable
+  if (admin_pass.length() > 0) {
+    if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) {
+      return server.requestAuthentication();
+    }
+  }
+
+  String html = "<h1>Admin Panel</h1>";
+  html += "<form action='/save' method='POST'>";
+  html += "<h3>Change Passwords</h3>";
+  html += "Admin User: <input type='text' name='admin_user' value='" + admin_user + "'><br>";
+  html += "Admin Pass: <input type='text' name='admin_pass' value='" + admin_pass + "'><br>";
+  html += "<br>";
+  html += "AddUser User: <input type='text' name='add_user_user' value='" + add_user_user + "'><br>";
+  html += "AddUser Pass: <input type='text' name='add_user_pass' value='" + add_user_pass + "'><br>";
+  html += "<br><input type='submit' value='Save All Settings'></form>";
+  html += "<hr><a href='/'>Back to Main Page</a>";
+  server.send(200, "text/html", html);
+}
+
+void handleSave(){
+  Serial.println("\n--- Saving settings from web interface ---");
+  
+  // WiFi settings are only saved if provided
+  if (server.hasArg("ssid") && server.hasArg("pass")) {
+    String new_ssid = server.arg("ssid");
+    String new_pass = server.arg("pass");
+    if(new_ssid.length() > 0) {
+        wifi_ssid = new_ssid;
+        wifi_pass = new_pass;
+        writeStringToEEPROM(EEPROM_WIFI_SSID_ADDR, wifi_ssid);
+        writeStringToEEPROM(EEPROM_WIFI_PASS_ADDR, wifi_pass);
+        Serial.println("WiFi credentials updated.");
+    }
+  }
+
+  // Admin and User settings are only saved if provided
+  if (server.hasArg("admin_user")) {
+    admin_user = server.arg("admin_user");
+    writeStringToEEPROM(EEPROM_ADMIN_USER_ADDR, admin_user);
+    Serial.println("Admin User updated.");
+  }
+  if (server.hasArg("admin_pass")) {
+    admin_pass = server.arg("admin_pass");
+    writeStringToEEPROM(EEPROM_ADMIN_PASS_ADDR, admin_pass);
+    Serial.println("Admin Pass updated.");
+  }
+  if (server.hasArg("add_user_user")) {
+    add_user_user = server.arg("add_user_user");
+    writeStringToEEPROM(EEPROM_ADD_USER_USER_ADDR, add_user_user);
+    Serial.println("Add User User updated.");
+  }
+  if (server.hasArg("add_user_pass")) {
+    add_user_pass = server.arg("add_user_pass");
+    writeStringToEEPROM(EEPROM_ADD_USER_PASS_ADDR, add_user_pass);
+    Serial.println("Add User Pass updated.");
+  }
+
+  server.send(200, "text/html", "<h2>Settings Saved!</h2><p>Device will restart to apply all changes.</p>");
+  delay(3000);
+  ESP.restart();
+}
+
+//=========================================================
+// HELPER FUNCTIONS
+//=========================================================
+void writeStringToEEPROM(int addr, const String& str) {
+  int len = str.length();
+  for (int i = 0; i < len; i++) {
+    EEPROM.write(addr + i, str[i]);
+  }
+  EEPROM.write(addr + len, '\0'); // Null terminator
+  EEPROM.commit();
+}
+
+String readStringFromEEPROM(int addr, int maxLen) {
+  char data[maxLen + 1];
+  int len = 0;
+  byte c = EEPROM.read(addr + len);
+  while (c != '\0' && c != 0xFF && len < maxLen) {
+    data[len] = (char)c;
+    len++;
+    c = EEPROM.read(addr + len);
+  }
+  data[len] = '\0';
+  return String(data);
+}

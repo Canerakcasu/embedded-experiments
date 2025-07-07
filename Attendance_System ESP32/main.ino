@@ -29,12 +29,12 @@ SemaphoreHandle_t sdMutex;
 #define BEEP_FREQUENCY 2600
 #define BUZZER_PIN 32
 #define CARD_COOLDOWN_SECONDS 5
-#define EVENT_TIMEOUT_MS 3000 
-#define MESSAGE_DISPLAY_MS 5000 
+#define EVENT_TIMEOUT_MS 3000
+#define MESSAGE_DISPLAY_MS 5000
 
 #define RST_PIN     22
 #define SS_PIN      15
-#define SD_CS_PIN       5 
+#define SD_CS_PIN       5
 #define HSPI_SCK_PIN    25
 #define HSPI_MISO_PIN   26
 #define HSPI_MOSI_PIN   27
@@ -50,15 +50,15 @@ const int I2C_SCL_PIN = 14;
 //=========================================================
 #define USER_DATABASE_FILE    "/users.csv"
 #define LOGS_DIRECTORY        "/logs"
+#define INVALID_LOGS_FILE     "/invalid_logs.csv"
 #define G_SHEETS_QUEUE_FILE   "/upload_queue.csv"
 #define G_SHEETS_SENDING_FILE "/upload_sending.csv"
 #define TEMP_USER_FILE        "/temp_users.csv"
 const char* GOOGLE_SCRIPT_ID = "https://script.google.com/macros/s/AKfycby1vGdWeMxtKsf0mf4i98NEv_NmrrHkRSRZ5-IMXtgSmRvFoyPZToPoie28pv-td8SnkQ/exec";
-#define UPLOAD_INTERVAL_MS 60000 
-#define USER_SYNC_INTERVAL_MS 60000 
+#define UPLOAD_INTERVAL_MS 60000
+#define USER_SYNC_INTERVAL_MS 60000
 #define EEPROM_SIZE 512
 
-// New, non-conflicting EEPROM addresses
 #define EEPROM_WIFI_SSID_ADDR           0
 #define EEPROM_WIFI_PASS_ADDR          60
 #define EEPROM_ADMIN_USER_ADDR         120
@@ -69,14 +69,13 @@ const char* GOOGLE_SCRIPT_ID = "https://script.google.com/macros/s/AKfycby1vGdWe
 //=========================================================
 // WIFI & AUTHENTICATION SETTINGS
 //=========================================================
-String wifi_ssid;
-String wifi_pass;
-String admin_user;
-String admin_pass;
-String add_user_user;
-String add_user_pass;
-
-const char* ap_ssid = "RFID-Config-Portal";
+char ssid[33];
+char password[64];
+const char* ap_ssid = "RFID-System-Setup";
+String ADMIN_USER = "admin";
+String ADMIN_PASS = "";
+String ADD_USER_AUTH_USER = "user";
+String ADD_USER_PASS = "";
 
 //=========================================================
 // TIME SETTINGS
@@ -270,6 +269,7 @@ void handleGetLastUID();
 void handleReboot();
 void handleChangePassword();
 void handleChangeAddUserPassword();
+void listFiles(String& html, const char* dirname, int levels);
 void handleNotFound();
 
 
@@ -295,6 +295,8 @@ void setup() {
   if (sdMutex == NULL) { Serial.println("ERROR: Mutex can not be created."); while(1); }
 
   EEPROM.begin(EEPROM_SIZE);
+  admin_pass = readStringFromEEPROM(EEPROM_PASS_ADDR_ADMIN, 60);
+  add_user_pass = readStringFromEEPROM(EEPROM_PASS_ADDR_ADD_USER, 60);
 
   SPI.begin();  
   hspi.begin(HSPI_SCK_PIN, HSPI_MISO_PIN, HSPI_MOSI_PIN);
@@ -326,7 +328,6 @@ void Task_Network(void *pvParameters) {
   loadCredentials();
 
   if (wifi_ssid.length() == 0) {
-    // --- SETUP (AP) MODE ---
     Serial.println("[Network Task] No WiFi config found. Starting Access Point mode.");
     WiFi.disconnect();
     WiFi.mode(WIFI_AP);
@@ -344,7 +345,6 @@ void Task_Network(void *pvParameters) {
         vTaskDelay(10 / portTICK_PERIOD_MS);
     }
   } else {
-    // --- NORMAL OPERATION MODE ---
     Serial.print("[Network Task] Attempting to connect to WiFi: ");
     Serial.println(wifi_ssid);
     WiFi.mode(WIFI_STA);
@@ -503,17 +503,16 @@ void loadCredentials() {
   wifi_ssid       = readStringFromEEPROM(EEPROM_WIFI_SSID_ADDR, 32);
   wifi_pass       = readStringFromEEPROM(EEPROM_WIFI_PASS_ADDR, 63);
   admin_user      = readStringFromEEPROM(EEPROM_ADMIN_USER_ADDR, 60);
-  admin_pass      = readStringFromEEPROM(EEPROM_ADMIN_PASS_ADDR, 60);
   add_user_user   = readStringFromEEPROM(EEPROM_ADD_USER_USER_ADDR, 60);
-  add_user_pass   = readStringFromEEPROM(EEPROM_ADD_USER_PASS_ADDR, 60);
 
+  // Passwords are loaded in setup()
+  
   if (admin_user.length() == 0) admin_user = "admin";
   if (add_user_user.length() == 0) add_user_user = "user";
   
   Serial.println("--- Configuration Loaded ---");
   Serial.printf("WiFi SSID: '%s'\n", wifi_ssid.c_str());
   Serial.printf("Admin User: '%s'\n", admin_user.c_str());
-  Serial.printf("Admin Pass: '%s'\n", admin_pass.c_str());
   Serial.println("--------------------------");
   EEPROM.end();
 }
@@ -600,10 +599,10 @@ void handleAdmin() {
  String html = "<html><head><title>Admin Panel</title><meta charset='UTF-8'><link href='/style.css' rel='stylesheet' type='text/css'></head><body><div class='container'>";
  html += "<h1>Admin Panel</h1><a href='/' class='home-link'>&larr; Back to Dashboard</a>";
  html += "<h2>Security Settings</h2>";
- html += "<h3>Admin Password</h3>";
- html += "<form action='/changepass' method='post'>New Admin Password: <input type='password' name='newpass'><br><small>To remove password, leave blank and save.</small><br><input type='submit' value='Change'></form>";
- html += "<h3>'Add User' Page Password</h3>";
- html += "<form action='/changeadduserpass' method='post'>New 'Add User' Password: <input type='password' name='newpass'><br><small>To remove password, leave blank and save.</small><br><input type='submit' value='Change'></form>";
+ html += "<h3>Admin Access</h3>";
+ html += "<form action='/changepass' method='post'>Admin Username: <input type='text' name='admin_user' value='" + admin_user + "'><br>New Admin Password: <input type='password' name='admin_pass'><br><small>To remove password, leave blank and save.</small><br><input type='submit' value='Save Admin Settings'></form>";
+ html += "<h3>'Add User' Page Access</h3>";
+ html += "<form action='/changeadduserpass' method='post'>'Add User' Username: <input type='text' name='add_user_user' value='" + add_user_user + "'><br>New 'Add User' Password: <input type='password' name='add_user_pass'><br><small>To remove password, leave blank and save.</small><br><input type='submit' value='Save User Settings'></form>";
  html += "<h2>User Management</h2>";
  html += "<table><tr><th>UID</th><th>Name</th><th>Current Status</th><th>Action</th></tr>";
  for (auto const& [uid, name] : userDatabase) {
@@ -694,42 +693,52 @@ void handleChangePassword() {
   if (admin_pass.length() > 0) {
     if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) return;
   }
-  if (server.hasArg("newpass")) {
-    String newPass = server.arg("newpass");
-    newPass.trim();
-    if (newPass.length() == 0 || newPass.length() > 3) {
-      writeStringToEEPROM(EEPROM_PASS_ADDR_ADMIN, newPass);
-      admin_pass = newPass;
-      server.send(200, "text/plain", "Admin password updated.");
-    } else {
-      server.send(400, "text/plain", "Password must be empty or longer than 3 characters.");
-    }
-  } else {
-    server.send(400, "text/plain", "No new password provided.");
+  if (server.hasArg("admin_user")) {
+    admin_user = server.arg("admin_user");
+    writeStringToEEPROM(EEPROM_ADMIN_USER_ADDR, admin_user);
   }
+  if (server.hasArg("admin_pass")) {
+    String newPass = server.arg("admin_pass");
+    if (newPass.length() == 0 || newPass.length() > 3) {
+      writeStringToEEPROM(EEPROM_ADMIN_PASS_ADDR, newPass);
+      admin_pass = newPass;
+    }
+  }
+  server.sendHeader("Location", "/admin", true);
+  server.send(302, "text/plain", "");
 }
 
 void handleChangeAddUserPassword() {
   if (admin_pass.length() > 0) {
     if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) return;
   }
-  if (server.hasArg("newpass")) {
-    String newPass = server.arg("newpass");
-    newPass.trim();
-    if (newPass.length() == 0 || newPass.length() > 2) {
-      writeStringToEEPROM(EEPROM_PASS_ADDR_ADD_USER, newPass);
-      add_user_pass = newPass;
-      server.send(200, "text/plain", "'Add User' password updated.");
-    } else {
-      server.send(400, "text/plain", "Password must be empty or longer than 2 characters.");
-    }
-  } else {
-    server.send(400, "text/plain", "No new password provided.");
+  if (server.hasArg("add_user_user")) {
+    add_user_user = server.arg("add_user_user");
+    writeStringToEEPROM(EEPROM_ADD_USER_USER_ADDR, add_user_user);
   }
+  if (server.hasArg("add_user_pass")) {
+    String newPass = server.arg("add_user_pass");
+    if (newPass.length() == 0 || newPass.length() > 3) {
+      writeStringToEEPROM(EEPROM_ADD_USER_PASS_ADDR, newPass);
+      add_user_pass = newPass;
+    }
+  }
+  server.sendHeader("Location", "/admin", true);
+  server.send(302, "text/plain", "");
 }
 
 void listFiles(String& html, const char* dirname, int levels) {
-    // This function remains unchanged from your original code.
+    File root = SD.open(dirname);
+    if (!root || !root.isDirectory()) return;
+    File file = root.openNextFile();
+    while (file) {
+        if (file.isDirectory()) {
+            if (levels) listFiles(html, file.path(), levels - 1);
+        } else {
+            html += "<tr><td>" + String(file.path()) + "</td><td>" + String(file.size()) + " B</td></tr>";
+        }
+        file = root.openNextFile();
+    }
 }
 
 void handleNotFound() { server.send(404, "text/plain", "404: Not Found"); }
@@ -749,15 +758,18 @@ void writeStringToEEPROM(int addr, const String& str) {
 }
 
 String readStringFromEEPROM(int addr, int maxLen) {
+  EEPROM.begin(EEPROM_SIZE);
   char data[maxLen + 1];
   int len = 0;
-  byte c = EEPROM.read(addr + len);
-  while (c != '\0' && c != 0xFF && len < maxLen) {
+  byte c;
+  while(len < maxLen) {
+    c = EEPROM.read(addr + len);
+    if (c == '\0' || c == 0xFF) break;
     data[len] = (char)c;
     len++;
-    c = EEPROM.read(addr + len);
   }
   data[len] = '\0';
+  EEPROM.end();
   return String(data);
 }
 
