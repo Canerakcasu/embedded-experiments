@@ -15,6 +15,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <EEPROM.h>
 #include <Update.h>
+#include <UniversalTelegramBot.h>
 
 //=========================================================
 // TASK & SEMAPHORE HANDLES
@@ -31,9 +32,10 @@ SemaphoreHandle_t sdMutex;
 #define CARD_COOLDOWN_SECONDS 5
 #define EVENT_TIMEOUT_MS 3000
 #define MESSAGE_DISPLAY_MS 5000
+#define WIFI_RECONNECT_TIMEOUT_MS 60000 // 1 dakika boyunca yeniden bağlanmayı dene
 
-#define RST_PIN     22
-#define SS_PIN      15
+#define RST_PIN         22
+#define SS_PIN          15
 #define SD_CS_PIN       5
 #define HSPI_SCK_PIN    25
 #define HSPI_MISO_PIN   26
@@ -46,6 +48,13 @@ const int I2C_SDA_PIN = 13;
 const int I2C_SCL_PIN = 14;
 
 //=========================================================
+// TELEGRAM & API SETTINGS
+//=========================================================
+#define BOT_TOKEN "7725746632:AAEGXEQVS1qTTuLZ5eg6YDoJj9nN87tkbgc" // <<< KENDI TELEGRAM BOT TOKEN'INIZI GIRIN
+#define CHAT_ID "5721778314"               // <<< KENDI CHAT ID'NIZI GIRIN
+const char* GOOGLE_SCRIPT_ID = "https://script.google.com/macros/s/AKfycby1vGdWeMxtKsf0mf4i98NEv_NmrrHkRSRZ5-IMXtgSmRvFoyPZToPoie28pv-td8SnkQ/exec";
+
+//=========================================================
 // FILE, API & EEPROM SETTINGS
 //=========================================================
 #define USER_DATABASE_FILE    "/users.csv"
@@ -54,24 +63,20 @@ const int I2C_SCL_PIN = 14;
 #define G_SHEETS_QUEUE_FILE   "/upload_queue.csv"
 #define G_SHEETS_SENDING_FILE "/upload_sending.csv"
 #define TEMP_USER_FILE        "/temp_users.csv"
-const char* GOOGLE_SCRIPT_ID = "https://script.google.com/macros/s/AKfycby1vGdWeMxtKsf0mf4i98NEv_NmrrHkRSRZ5-IMXtgSmRvFoyPZToPoie28pv-td8SnkQ/exec";
 #define UPLOAD_INTERVAL_MS 60000
 #define USER_SYNC_INTERVAL_MS 60000
 #define EEPROM_SIZE 512
 
-#define EEPROM_WIFI_SSID_ADDR           0
-#define EEPROM_WIFI_PASS_ADDR          60
-#define EEPROM_ADMIN_USER_ADDR         120
-#define EEPROM_ADMIN_PASS_ADDR         180
-#define EEPROM_ADD_USER_USER_ADDR      240
-#define EEPROM_ADD_USER_PASS_ADDR      300
+#define EEPROM_WIFI_SSID_ADDR         0
+#define EEPROM_WIFI_PASS_ADDR        60
+#define EEPROM_ADMIN_USER_ADDR       120
+#define EEPROM_ADMIN_PASS_ADDR       180
+#define EEPROM_ADD_USER_USER_ADDR    240
+#define EEPROM_ADD_USER_PASS_ADDR    300
 
 //=========================================================
 // WIFI & AUTHENTICATION SETTINGS
 //=========================================================
-char ssid[33];
-char password[64];
-const char* ap_ssid = "RFID-System-Setup";
 String wifi_ssid;
 String wifi_pass;
 String admin_user;
@@ -79,12 +84,13 @@ String admin_pass;
 String add_user_user;
 String add_user_pass;
 
+const char* ap_ssid = "RFID-Config-Portal";
 
 //=========================================================
 // TIME SETTINGS
 //=========================================================
 const char* ntpServer = "pool.ntp.org";
-const long  gmtOffset_sec = 7200;
+const long  gmtOffset_sec = 7200; // Poland Time (GMT+2)
 const int   daylightOffset_sec = 0;
 
 //=========================================================
@@ -103,10 +109,24 @@ int lastDay = -1;
 unsigned long lastEventTimer = 0;
 long lastUserFileSize = 0;
 
-
 enum DisplayState { SHOWING_MESSAGE, SHOWING_TIME };
 DisplayState currentDisplayState = SHOWING_TIME;
 unsigned long lastCardActivityTime = 0;
+
+WiFiClientSecure client;
+UniversalTelegramBot bot(BOT_TOKEN, client);
+unsigned long lastBotCheckTime = 0;
+const int botRequestDelay = 2000;
+
+enum NetworkState {
+  STATE_WIFI_CONNECTING,
+  STATE_WIFI_CONNECTED,
+  STATE_WIFI_DISCONNECTED_RECONNECTING,
+  STATE_AP_MODE
+};
+NetworkState currentNetworkState;
+unsigned long lastReconnectAttempt = 0;
+
 
 //=========================================================
 // WEB PAGE CONTENT (PROGMEM)
@@ -147,10 +167,11 @@ const char PAGE_Main[] PROGMEM = R"rawliteral(
 <!DOCTYPE html><html><head><title>RFID Control System</title><meta charset="UTF-8"><link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap" rel="stylesheet"><link href="/style.css" rel="stylesheet" type="text/css"></head>
 <body><div class="container"><h1>RFID Access Control</h1><h2 id="currentTime">--:--:--</h2>
 <h3>Connected to: <span id="wifiSSID" style="color: #03dac6;">-</span></h3>
+<h3 style="margin-top:-15px;">Uptime: <span id="uptime" style="color: #03dac6;">-</span></h3>
 <h2>Last Event</h2><div class="data-grid">
 <span>Time:</span><span id="eventTime">-</span><span>Card UID:</span><span id="eventUID">-</span>
 <span>Name:</span><span id="eventName">-</span><span>Action:</span><span id="eventAction">-</span>
-</div><p class="footer-nav"><a href="/admin">Admin Panel</a> | <a href="/logs">Activity Logs</a> | <a href="/adduserpage">Add New User</a></p></div>
+</div><p class="footer-nav"><a href="/admin">Admin Panel</a> | <a href="/adduserpage">Add New User</a></p></div>
 <script>
 function updateTime() { document.getElementById('currentTime').innerText = new Date().toLocaleTimeString('tr-TR'); }
 function fetchData() { fetch('/data').then(response => response.json()).then(data => {
@@ -159,6 +180,7 @@ function fetchData() { fetch('/data').then(response => response.json()).then(dat
     document.getElementById('eventName').innerText = data.name;
     document.getElementById('eventAction').innerText = data.action;
     document.getElementById('wifiSSID').innerText = data.ssid;
+    document.getElementById('uptime').innerText = data.uptime;
 });}
 setInterval(updateTime, 1000); setInterval(fetchData, 2000); window.onload = () => { updateTime(); fetchData(); };
 </script></body></html>
@@ -167,7 +189,7 @@ setInterval(updateTime, 1000); setInterval(fetchData, 2000); window.onload = () 
 const char PAGE_WIFI_SETUP[] PROGMEM = R"rawliteral(
 <!DOCTYPE html><html><head><title>RFID WiFi Setup</title><meta charset="UTF-8"><link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap" rel="stylesheet"><link href="/style.css" rel="stylesheet" type="text/css"></head>
 <body><div class="container" style="min-width: 500px;">
-<h1>WiFi Setup</h1><p style="color:#bbb;">Could not connect. Please select a new network.</p>
+<h1>WiFi Setup</h1><p style="color:#bbb;">Could not connect to the network. Please select or enter a new network.</p>
 <button onclick="scanNetworks()">Scan for Available Networks</button><div id="loader" style="display:none; color:#bbb;">Scanning...</div><table id="wifi-list-table" style="display:none;"></table>
 <form action="/save" method="POST">
 <h3>Enter Credentials</h3>
@@ -236,45 +258,6 @@ setInterval(getLastUID, 1000); window.onload = getLastUID;
 </script></body></html>
 )rawliteral";
 
-// Bu değişkeni diğer PAGE_... değişkenlerinin yanına ekleyin
-const char PAGE_Logs[] PROGMEM = R"rawliteral(
-<!DOCTYPE html><html><head><title>Activity Logs</title><meta charset="UTF-8"><link href="/style.css" rel="stylesheet" type="text/css"></head>
-<body><div class="container"><h1>Today's Activity Log</h1><a href='/' class='home-link'>&larr; Back to Dashboard</a>
-<h3 id="logFileName"></h3>
-<table><thead><tr><th>Time</th><th>Action</th><th>UID</th><th>Name</th><th>Duration</th></tr></thead>
-<tbody id="log-table-body">
-<tr><td colspan='5'>Loading logs...</td></tr>
-</tbody></table></div>
-<script>
-function fetchLogs() {
-  fetch('/getlogs').then(response => response.text()).then(data => {
-    const tbody = document.getElementById('log-table-body');
-    const logFileName = document.getElementById('logFileName');
-    tbody.innerHTML = '';
-    if (data.startsWith('FILE_NOT_FOUND')) {
-      logFileName.innerText = data.substring(15);
-      tbody.innerHTML = "<tr><td colspan='5'>No activity recorded for today yet.</td></tr>";
-      return;
-    }
-    const lines = data.split('\n');
-    logFileName.innerText = lines[0]; // İlk satır dosya adıdır
-    for (let i = 1; i < lines.length; i++) {
-      if (lines[i].trim() === '') continue;
-      const parts = lines[i].split(',');
-      if (parts.length < 6) continue;
-      let row = tbody.insertRow();
-      row.insertCell(0).innerText = parts[0];
-      row.insertCell(1).innerText = parts[1];
-      row.insertCell(2).innerText = parts[2];
-      row.insertCell(3).innerText = parts[3];
-      row.insertCell(4).innerText = parts[5];
-    }
-  });
-}
-setInterval(fetchLogs, 5000); // Her 5 saniyede bir logları yenile
-window.onload = fetchLogs;
-</script></body></html>
-)rawliteral";
 //=========================================================
 // FUNCTION PROTOTYPES
 //=========================================================
@@ -288,6 +271,7 @@ String getUIDString(MFRC522::Uid uid);
 void logActivityToSd(String event, String uid, String name, unsigned long duration, time_t event_time);
 void logInvalidAttemptToSd(String uid);
 String formatDuration(unsigned long totalSeconds);
+String formatUptime();
 void checkForDailyReset();
 void updateDisplayMessage(String line1, String line2);
 void updateDisplayDateTime();
@@ -303,7 +287,6 @@ void handleRoot();
 void handleCSS();
 void handleData();
 void handleAdmin();
-void handleLogs();
 void handleDeleteUser();
 void handleAddUser();
 void handleAddUserPage();
@@ -311,18 +294,22 @@ void handleGetLastUID();
 void handleReboot();
 void handleChangePassword();
 void handleChangeAddUserPassword();
-void listFiles(String& html, const char* dirname, int levels);
+void listFiles(String& html, File dir, int levels);
 void handleNotFound();
-
 void handleUpdate();
 void handleUpdateUpload();
+void handleTelegramBot();
+void sendTelegramLog(String message);
 void handleFileDownload();
-void handleGetLogs();
+void startAPMode();
+
+
 //=========================================================
 // SETUP
 //=========================================================
 void setup() {
   Serial.begin(115200);
+  client.setInsecure(); // For Telegram and Google Sheets
   delay(1000);
   pinMode(BUZZER_PIN, OUTPUT);
   Serial.println("\n-- RFID Access System with WiFi Manager --");
@@ -338,7 +325,7 @@ void setup() {
   
   sdMutex = xSemaphoreCreateMutex();
   if (sdMutex == NULL) { Serial.println("ERROR: Mutex can not be created."); while(1); }
-  loadCredentials();
+
   SPI.begin();  
   hspi.begin(HSPI_SCK_PIN, HSPI_MISO_PIN, HSPI_MOSI_PIN);
   
@@ -352,6 +339,8 @@ void setup() {
   xSemaphoreGive(sdMutex);
 
   rfid.PCD_Init();
+  
+  loadCredentials();
   loadUsersFromSd();
 
   xTaskCreatePinnedToCore(Task_Network, "Network_Task", 10000, NULL, 1, &Task_Network_Handle, 1);
@@ -361,89 +350,125 @@ void setup() {
 }
 
 //=========================================================
-// NETWORK TASK (CORE 1)
+// NETWORK TASK (CORE 1) - Handles WiFi, Web Server, and uploads
 //=========================================================
 void Task_Network(void *pvParameters) {
   Serial.println("[Network Task] Started on Core 1.");
   
-  loadCredentials();
-
   if (wifi_ssid.length() == 0) {
-    Serial.println("[Network Task] No WiFi config found. Starting Access Point mode.");
-    WiFi.disconnect();
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(ap_ssid);
-    IPAddress apIP = WiFi.softAPIP();
-    Serial.print("[Network Task] AP Mode enabled. Connect to '");
-    Serial.print(ap_ssid);
-    Serial.print("' and go to http://");
-    Serial.println(apIP);
-    updateDisplayMessage("SETUP MODE", apIP.toString());
-    setupAPServer();
-    server.begin();
-    for(;;) {
-        server.handleClient();
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-    }
+    currentNetworkState = STATE_AP_MODE;
+    startAPMode();
   } else {
-    Serial.print("[Network Task] Attempting to connect to WiFi: ");
-    Serial.println(wifi_ssid);
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
-    int connection_attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && connection_attempts < 40) {
-      vTaskDelay(500 / portTICK_PERIOD_MS);
-      Serial.print(".");
-      connection_attempts++;
-    }
+    currentNetworkState = STATE_WIFI_CONNECTING;
+  }
 
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\n[Network Task] WiFi Connected!");
-      Serial.print("[Network Task] IP Address: http://"); Serial.println(WiFi.localIP());
-      updateDisplayMessage("WiFi Connected", WiFi.localIP().toString());
-      setupTime();
-      setupDashboardServer();
-      server.begin();
-      Serial.println("[Network Task] Dashboard Web Server started.");
-      syncUserListToSheets(); 
-      unsigned long lastUploadTime = 0;
-      unsigned long lastUserFileSyncTime = 0;
-      for (;;) {
-        if (WiFi.status() != WL_CONNECTED) {
-            Serial.println("[Network Task] Connection Lost! Restarting to enter AP Mode...");
-            ESP.restart();
+  unsigned long lastUploadTime = 0;
+  unsigned long lastUserFileSyncTime = 0;
+  
+  for (;;) {
+    switch (currentNetworkState) {
+      case STATE_WIFI_CONNECTING: {
+        Serial.print("[Network Task] Attempting to connect to WiFi: ");
+        Serial.println(wifi_ssid);
+        updateDisplayMessage("Connecting to:", wifi_ssid);
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
+        int connection_attempts = 0;
+        while (WiFi.status() != WL_CONNECTED && connection_attempts < 30) {
+          vTaskDelay(500 / portTICK_PERIOD_MS);
+          Serial.print(".");
+          connection_attempts++;
         }
+
+        if (WiFi.status() == WL_CONNECTED) {
+          Serial.println("\n[Network Task] WiFi Connected!");
+          Serial.print("[Network Task] IP Address: http://"); Serial.println(WiFi.localIP());
+          updateDisplayMessage("WiFi Connected", WiFi.localIP().toString());
+          setupTime();
+          setupDashboardServer();
+          server.begin();
+          Serial.println("[Network Task] Dashboard Web Server started.");
+          syncUserListToSheets();
+          currentNetworkState = STATE_WIFI_CONNECTED;
+        } else {
+          Serial.println("\n[Network Task] Could not connect. Starting AP Mode.");
+          currentNetworkState = STATE_AP_MODE;
+          startAPMode();
+        }
+        break;
+      }
+
+      case STATE_WIFI_CONNECTED:
+        if (WiFi.status() != WL_CONNECTED) {
+          Serial.println("[Network Task] Connection Lost! Attempting to reconnect...");
+          updateDisplayMessage("Connection Lost", "Reconnecting...");
+          lastReconnectAttempt = millis();
+          currentNetworkState = STATE_WIFI_DISCONNECTED_RECONNECTING;
+          break;
+        }
+        
         server.handleClient();
+
         if (millis() - lastUploadTime > UPLOAD_INTERVAL_MS) {
           sendDataToGoogleSheets();
           lastUploadTime = millis();
         }
+
         if (millis() - lastUserFileSyncTime > USER_SYNC_INTERVAL_MS) {
           xSemaphoreTake(sdMutex, portMAX_DELAY);
           File userFile = SD.open(USER_DATABASE_FILE, FILE_READ);
           if (userFile) {
             if (userFile.size() != lastUserFileSize) {
-              Serial.printf("[Network Task] User file change detected (old: %ld, new: %ld). Syncing...\n", lastUserFileSize, userFile.size());
+              Serial.printf("[Network Task] User file change detected. Syncing...\n");
               lastUserFileSize = userFile.size();
               userFile.close();
               xSemaphoreGive(sdMutex); 
               syncUserListToSheets(); 
             } else {
-               userFile.close();
-               xSemaphoreGive(sdMutex);
+              userFile.close();
+              xSemaphoreGive(sdMutex);
             }
           } else {
-             xSemaphoreGive(sdMutex);
+            xSemaphoreGive(sdMutex);
           }
           lastUserFileSyncTime = millis();
         }
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-      }
-    } else {
-      Serial.println("\n[Network Task] Could not connect to saved WiFi. Restarting in AP Mode...");
-      delay(3000);
-      ESP.restart();
+
+        if (millis() - lastBotCheckTime > botRequestDelay) {
+          handleTelegramBot();
+          lastBotCheckTime = millis();
+        }
+        break;
+
+      case STATE_WIFI_DISCONNECTED_RECONNECTING:
+        if (millis() - lastReconnectAttempt > 5000) { // Her 5 saniyede bir dene
+            Serial.println("[Network Task] Re-attempting WiFi connection...");
+            WiFi.reconnect();
+            lastReconnectAttempt = millis();
+            int attempts = 0;
+            while (WiFi.status() != WL_CONNECTED && attempts < 10) {
+                vTaskDelay(500 / portTICK_PERIOD_MS);
+                attempts++;
+            }
+            if(WiFi.status() == WL_CONNECTED){
+                Serial.println("[Network Task] Reconnected to WiFi!");
+                updateDisplayMessage("Reconnected!", WiFi.localIP().toString());
+                currentNetworkState = STATE_WIFI_CONNECTED;
+            }
+        }
+        
+        if (millis() > lastReconnectAttempt + WIFI_RECONNECT_TIMEOUT_MS && WiFi.status() != WL_CONNECTED) {
+            Serial.println("[Network Task] Reconnection failed. Switching to AP mode.");
+            currentNetworkState = STATE_AP_MODE;
+            startAPMode();
+        }
+        break;
+
+      case STATE_AP_MODE:
+        server.handleClient();
+        break;
     }
+    vTaskDelay(10 / portTICK_PERIOD_MS);
   }
 }
 
@@ -478,16 +503,19 @@ void Task_RFID(void *pvParameters) {
       String name = getUserName(uid);
       time_t now = time(nullptr);
       String fullTimestamp = getFormattedTime(now);
-      lastEventTime = fullTimestamp;
+      lastEventTime = fullTimestamp.substring(11);
       lastEventUID = uid;
       lastEventName = name;
       lastEventTimer = millis();
+
       if (name == "Unknown User") {
         Serial.println("[RFID Task] UID not found in database. Access DENIED.");
         logInvalidAttemptToSd(uid);
         playBuzzer(2);
         lastEventAction = "INVALID";
         updateDisplayMessage("Access Denied", "");
+        String msg = "🚫 *Access Denied* 🚫\nUID: `" + uid + "`";
+        sendTelegramLog(msg);
       } else {
         Serial.printf("[RFID Task] User identified: %s. Processing...\n", name.c_str());
         if (lastScanTime.count(uid) && (millis() - lastScanTime[uid] < CARD_COOLDOWN_SECONDS * 1000)) {
@@ -502,6 +530,8 @@ void Task_RFID(void *pvParameters) {
               entryTime[uid] = now;
               lastEventAction = "ENTER";
               updateDisplayMessage("Welcome", name);
+              String msg = "✅ *ENTER: " + name + "*\nTime: " + fullTimestamp.substring(11);
+              sendTelegramLog(msg);
             } else {
               Serial.println("[RFID Task] Action: EXIT");
               unsigned long duration = 0;
@@ -516,6 +546,8 @@ void Task_RFID(void *pvParameters) {
               userStatus[uid] = false;
               lastEventAction = "EXIT";
               updateDisplayMessage("Goodbye", name);
+              String msg = "🚪 *EXIT: " + name + "*\nTime: " + fullTimestamp.substring(11) + "\nDuration: `" + formatDuration(duration) + "`";
+              sendTelegramLog(msg);
             }
             lastScanTime[uid] = millis();
         }
@@ -534,57 +566,33 @@ void loop() {
   vTaskDelete(NULL);
 }
 
-
 //=========================================================
 // WIFI & WEB SERVER FUNCTIONS
 //=========================================================
 void loadCredentials() {
-  Serial.println("[Config] Loading all settings from EEPROM...");
   EEPROM.begin(EEPROM_SIZE);
+  Serial.println("[Config] Loading all settings from EEPROM...");
+  wifi_ssid       = readStringFromEEPROM(EEPROM_WIFI_SSID_ADDR, 32);
+  wifi_pass       = readStringFromEEPROM(EEPROM_WIFI_PASS_ADDR, 63);
+  admin_user      = readStringFromEEPROM(EEPROM_ADMIN_USER_ADDR, 60);
+  admin_pass      = readStringFromEEPROM(EEPROM_ADMIN_PASS_ADDR, 60);
+  add_user_user   = readStringFromEEPROM(EEPROM_ADD_USER_USER_ADDR, 60);
+  add_user_pass   = readStringFromEEPROM(EEPROM_ADD_USER_PASS_ADDR, 60);
 
-  // Read all settings from their respective EEPROM addresses
-  wifi_ssid     = readStringFromEEPROM(EEPROM_WIFI_SSID_ADDR, 32);
-  wifi_pass     = readStringFromEEPROM(EEPROM_WIFI_PASS_ADDR, 63);
-  admin_user    = readStringFromEEPROM(EEPROM_ADMIN_USER_ADDR, 60);
-  admin_pass    = readStringFromEEPROM(EEPROM_ADMIN_PASS_ADDR, 60);
-  add_user_user = readStringFromEEPROM(EEPROM_ADD_USER_USER_ADDR, 60);
-  add_user_pass = readStringFromEEPROM(EEPROM_ADD_USER_PASS_ADDR, 60);
-
-  EEPROM.end(); // We are done with EEPROM for now
-
-  // If a setting was empty in EEPROM, assign a hard-coded default
-  if (wifi_ssid.length() == 0) {
-    // Leave blank to force AP mode on first boot
-  }
-  if (admin_user.length() == 0) {
-    admin_user = "admin";
-  }
-  if (admin_pass.length() == 0) {
-    admin_pass = ""; // No password by default
-  }
-  if (add_user_user.length() == 0) {
-    add_user_user = "user";
-  }
-  if (add_user_pass.length() == 0) {
-    add_user_pass = ""; // No password by default
-  }
+  if (admin_user.length() == 0) admin_user = "admin";
+  if (add_user_user.length() == 0) add_user_user = "user";
   
-  // Print the final, loaded configuration to the Serial Monitor
-  Serial.println("--- Configuration Loaded at Boot ---");
-  Serial.printf("WiFi SSID:      '%s'\n", wifi_ssid.c_str());
-  Serial.printf("WiFi Pass:      '%s'\n", wifi_pass.c_str());
-  Serial.printf("Admin User:     '%s'\n", admin_user.c_str());
-  Serial.printf("Admin Pass:     '%s'\n", admin_pass.c_str());
-  Serial.printf("Add User User:  '%s'\n", add_user_user.c_str());
-  Serial.printf("Add User Pass:  '%s'\n", add_user_pass.c_str());
-  Serial.println("------------------------------------");
+  Serial.println("--- Configuration Loaded ---");
+  Serial.printf("WiFi SSID:  '%s'\n", wifi_ssid.c_str());
+  Serial.printf("Admin User: '%s'\n", admin_user.c_str());
+  Serial.println("--------------------------");
+  EEPROM.end();
 }
 
 void setupDashboardServer() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/data", HTTP_GET, handleData);
   server.on("/admin", HTTP_GET, handleAdmin);
-  server.on("/logs", HTTP_GET, handleLogs);
   server.on("/adduserpage", HTTP_GET, handleAddUserPage);
   server.on("/getlastuid", HTTP_GET, handleGetLastUID);
   server.on("/style.css", HTTP_GET, handleCSS);
@@ -593,11 +601,30 @@ void setupDashboardServer() {
   server.on("/reboot", HTTP_POST, handleReboot);
   server.on("/changepass", HTTP_POST, handleChangePassword);
   server.on("/changeadduserpass", HTTP_POST, handleChangeAddUserPassword);
-  server.on("/update", HTTP_POST, handleUpdate, handleUpdateUpload);
   server.on("/download", HTTP_GET, handleFileDownload);
-  server.on("/getlogs", HTTP_GET, handleGetLogs);
 
-  server.onNotFound(handleNotFound);
+  server.on("/update", HTTP_POST, []() {
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/plain", (Update.hasError()) ? "UPDATE FAILED" : "UPDATE SUCCESS! Rebooting...");
+    ESP.restart();
+  }, handleUpdateUpload);
+    server.onNotFound(handleNotFound);
+
+}
+
+void startAPMode() {
+  Serial.println("[Network Task] Starting Access Point mode.");
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ap_ssid);
+  IPAddress apIP = WiFi.softAPIP();
+  Serial.print("[Network Task] AP Mode enabled. Connect to '");
+  Serial.print(ap_ssid);
+  Serial.print("' and go to http://");
+  Serial.println(apIP);
+  updateDisplayMessage("SETUP MODE", apIP.toString());
+  setupAPServer();
+  server.begin();
 }
 
 void setupAPServer() {
@@ -606,10 +633,12 @@ void setupAPServer() {
         wifi_ssid = server.arg("ssid");
         wifi_pass = server.arg("pass");
         Serial.printf("[AP Mode] New WiFi credentials received: SSID = %s\n", wifi_ssid.c_str());
+        
         EEPROM.begin(EEPROM_SIZE);
         writeStringToEEPROM(EEPROM_WIFI_SSID_ADDR, wifi_ssid);
         writeStringToEEPROM(EEPROM_WIFI_PASS_ADDR, wifi_pass);
         EEPROM.end();
+        
         server.send(200, "text/html", "<h2>Settings Saved!</h2><p>Device will restart with new settings in 5 seconds.</p>");
         delay(5000);
         ESP.restart();
@@ -632,12 +661,13 @@ void handleRoot() { server.send_P(200, "text/html", PAGE_Main); }
 void handleCSS() { server.send_P(200, "text/css", PAGE_CSS); }
 
 void handleData() {
-  StaticJsonDocument<256> doc;
+  StaticJsonDocument<384> doc;
   doc["time"] = lastEventTime;
   doc["uid"] = lastEventUID;
   doc["name"] = lastEventName;
   doc["action"] = lastEventAction;
-  doc["ssid"] = wifi_ssid;
+  doc["ssid"] = (WiFi.status() == WL_CONNECTED) ? wifi_ssid : "Disconnected";
+  doc["uptime"] = formatUptime();
   String json;
   serializeJson(doc, json);
   server.send(200, "application/json", json);
@@ -658,48 +688,52 @@ void handleGetLastUID() {
 }
 
 void handleAdmin() {
- if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) { return server.requestAuthentication(); }
- 
+  if (admin_pass.length() > 0) {
+    if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) { 
+      return server.requestAuthentication(); 
+    }
+  }
  String html = "<html><head><title>Admin Panel</title><meta charset='UTF-8'><link href='/style.css' rel='stylesheet' type='text/css'></head><body><div class='container'>";
  html += "<h1>Admin Panel</h1><a href='/' class='home-link'>&larr; Back to Dashboard</a>";
- 
- // Security Settings (Unchanged)
  html += "<h2>Security Settings</h2>";
  html += "<h3>Admin Access</h3>";
  html += "<form action='/changepass' method='post'>Admin Username: <input type='text' name='admin_user' value='" + admin_user + "'><br>New Admin Password: <input type='password' name='admin_pass'><br><small>To remove password, leave blank and save.</small><br><input type='submit' value='Save Admin Settings'></form>";
  html += "<h3>'Add User' Page Access</h3>";
  html += "<form action='/changeadduserpass' method='post'>'Add User' Username: <input type='text' name='add_user_user' value='" + add_user_user + "'><br>New 'Add User' Password: <input type='password' name='add_user_pass'><br><small>To remove password, leave blank and save.</small><br><input type='submit' value='Save User Settings'></form>";
- 
- // User Management (Unchanged)
  html += "<h2>User Management</h2>";
  html += "<table><tr><th>UID</th><th>Name</th><th>Current Status</th><th>Action</th></tr>";
  for (auto const& [uid, name] : userDatabase) {
-   html += "<tr><td>" + uid + "</td><td>" + name + "</td><td>" + (userStatus[uid] ? "<span class='status status-in'>INSIDE</span>" : "<span class='status status-out'>OUTSIDE</span>") + "</td>";
-   html += "<td><a href='/deleteuser?uid=" + uid + "' class='btn-delete' onclick='return confirm(\"Are you sure?\");'>Delete</a></td></tr>";
+    html += "<tr><td>" + uid + "</td><td>" + name + "</td><td>" + (userStatus[uid] ? "<span class='status status-in'>INSIDE</span>" : "<span class='status status-out'>OUTSIDE</span>") + "</td>";
+    html += "<td><a href='/deleteuser?uid=" + uid + "' class='btn-delete' onclick='return confirm(\"Are you sure?\");'>Delete</a></td></tr>";
  }
  html += "</table>";
  
- html += "<h2>Firmware Update (OTA)</h2>";
+ // YENİ DÜZENLEME BURADA BAŞLIYOR
+ html += "<h2>Device Management</h2>";
+ 
+ // 1. Reboot butonu
+ html += "<form action='/reboot' method='post' onsubmit='return confirm(\"Reboot the device?\");'><button class='btn-reboot'>Reboot Device</button></form>";
+ 
+ // 2. OTA Güncelleme Formu
+ html += "<h3>Firmware Update (OTA)</h3>";
  html += "<form method='POST' action='/update' enctype='multipart/form-data'>";
- html += "<input type='file' name='update' accept='.bin' style='color:#e0e0e0; width:auto;'>";
+ html += "<input type='file' name='update' accept='.bin' style='color:#e0e0e0; width:auto; border: 1px solid #444; padding: 5px;'>";
  html += "<input type='submit' value='Upload and Update'></form>";
 
- html += "<h2>SD Card File Manager</h2>";
- html += "<table><tr><th>File Path</th><th>Size</th><th>Action</th></tr>";
+ // 3. Gömülü Dosya Yöneticisi
+ html += "<h3>File Manager</h3>";
+ html += "<table><tr><th>File Path</th><th>Size (Bytes)</th><th>Action</th></tr>";
  xSemaphoreTake(sdMutex, portMAX_DELAY);
- listFiles(html, "/", 0);
- listFiles(html, LOGS_DIRECTORY, 2);
+ File root = SD.open("/");
+ if(root){
+   listFiles(html, root, 0);
+   root.close();
+ }
  xSemaphoreGive(sdMutex);
  html += "</table>";
 
- html += "<h2>Device Management</h2>";
- html += "<form action='/reboot' method='post' onsubmit='return confirm(\"Reboot the device?\");'><button class='btn-reboot'>Reboot Device</button></form>";
-
  html += "</div></body></html>";
  server.send(200, "text/html", html);
-}
-void handleLogs() {
-  server.send_P(200, "text/html", PAGE_Logs);
 }
 
 void handleDeleteUser() {
@@ -765,17 +799,17 @@ void handleChangePassword() {
   if (admin_pass.length() > 0) {
     if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) return;
   }
+  EEPROM.begin(EEPROM_SIZE);
   if (server.hasArg("admin_user")) {
     admin_user = server.arg("admin_user");
     writeStringToEEPROM(EEPROM_ADMIN_USER_ADDR, admin_user);
   }
   if (server.hasArg("admin_pass")) {
-    String newPass = server.arg("admin_pass");
-    if (newPass.length() == 0 || newPass.length() > 3) {
-      writeStringToEEPROM(EEPROM_ADMIN_PASS_ADDR, newPass);
-      admin_pass = newPass;
-    }
+    admin_pass = server.arg("admin_pass");
+    writeStringToEEPROM(EEPROM_ADMIN_PASS_ADDR, admin_pass);
   }
+  EEPROM.commit();
+  EEPROM.end();
   server.sendHeader("Location", "/admin", true);
   server.send(302, "text/plain", "");
 }
@@ -784,19 +818,42 @@ void handleChangeAddUserPassword() {
   if (admin_pass.length() > 0) {
     if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) return;
   }
+  EEPROM.begin(EEPROM_SIZE);
   if (server.hasArg("add_user_user")) {
     add_user_user = server.arg("add_user_user");
     writeStringToEEPROM(EEPROM_ADD_USER_USER_ADDR, add_user_user);
   }
   if (server.hasArg("add_user_pass")) {
-    String newPass = server.arg("add_user_pass");
-    if (newPass.length() == 0 || newPass.length() > 3) {
-      writeStringToEEPROM(EEPROM_ADD_USER_PASS_ADDR, newPass);
-      add_user_pass = newPass;
-    }
+    add_user_pass = server.arg("add_user_pass");
+    writeStringToEEPROM(EEPROM_ADD_USER_PASS_ADDR, add_user_pass);
   }
+  EEPROM.commit();
+  EEPROM.end();
   server.sendHeader("Location", "/admin", true);
   server.send(302, "text/plain", "");
+}
+
+void listFiles(String& html, File dir, int levels) {
+    while (true) {
+        File entry = dir.openNextFile();
+        if (!entry) {
+            break;
+        }
+        String filePath = String(entry.name());
+        html += "<tr><td>" + filePath + "</td><td>";
+        if(entry.isDirectory()){
+            html += "DIR";
+            html += "</td><td>-</td></tr>";
+        } else {
+            html += entry.size();
+            html += "</td><td><a href='/download?path=" + filePath + "'>Download</a></td></tr>";
+        }
+
+        if (entry.isDirectory()) {
+            listFiles(html, entry, levels + 1);
+        }
+        entry.close();
+    }
 }
 
 
@@ -806,31 +863,85 @@ void handleNotFound() { server.send(404, "text/plain", "404: Not Found"); }
 // HELPER FUNCTIONS
 //=========================================================
 void writeStringToEEPROM(int addr, const String& str) {
-  EEPROM.begin(EEPROM_SIZE);
   int len = str.length();
   for (int i = 0; i < len; i++) {
     EEPROM.write(addr + i, str[i]);
   }
   EEPROM.write(addr + len, '\0');
-  EEPROM.commit();
-  EEPROM.end();
 }
 
 String readStringFromEEPROM(int addr, int maxLen) {
-  EEPROM.begin(EEPROM_SIZE);
   char data[maxLen + 1];
   int len = 0;
-  byte c;
-  while(len < maxLen) {
-    c = EEPROM.read(addr + len);
-    if (c == '\0' || c == 0xFF) break;
+  byte c = EEPROM.read(addr + len);
+  while (c != '\0' && c != 0xFF && len < maxLen) {
     data[len] = (char)c;
     len++;
+    c = EEPROM.read(addr + len);
   }
   data[len] = '\0';
-  EEPROM.end();
   return String(data);
 }
+
+void handleFileDownload() {
+  if (server.hasArg("path")) {
+    String path = server.arg("path");
+    if (path == "" || !SD.exists(path)) {
+      server.send(404, "text/plain", "File Not Found");
+      return;
+    }
+    xSemaphoreTake(sdMutex, portMAX_DELAY);
+    File download = SD.open(path);
+    if (download) {
+      server.streamFile(download, "application/octet-stream");
+      download.close();
+    } else {
+      server.send(404, "text/plain", "File Not Found");
+    }
+    xSemaphoreGive(sdMutex);
+  }
+}
+
+void handleTelegramBot() {
+    int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+    for (int i=0; i<numNewMessages; i++) {
+        String chat_id = String(bot.messages[i].chat_id);
+        String text = bot.messages[i].text;
+        if (text == "/status") {
+            String status_msg = "Device Online\nSSID: " + wifi_ssid + "\nUptime: " + formatUptime();
+            bot.sendMessage(chat_id, status_msg, "");
+        }
+    }
+}
+
+void sendTelegramLog(String message) {
+    if (WiFi.status() == WL_CONNECTED) {
+        bot.sendMessage(CHAT_ID, message, "Markdown");
+    } else {
+        Serial.println("[Telegram] WiFi disconnected. Cannot send message.");
+    }
+}
+
+String formatUptime() {
+    unsigned long now = millis();
+    unsigned long sec = now / 1000;
+    unsigned long min = sec / 60;
+    unsigned long hr = min / 60;
+    unsigned long days = hr / 24;
+    sec %= 60;
+    min %= 60;
+    hr %= 24;
+    
+    String uptime = "";
+    if (days > 0) {
+        uptime += String(days) + "d ";
+    }
+    uptime += String(hr) + "h ";
+    uptime += String(min) + "m ";
+    uptime += String(sec) + "s";
+    return uptime;
+}
+
 
 void sendDataToGoogleSheets() {
   Serial.println("\n[GSheet] Checking for data to upload...");
@@ -850,7 +961,6 @@ void sendDataToGoogleSheets() {
   }
   queueFile.close();
   if (SD.exists(G_SHEETS_SENDING_FILE)) { SD.remove(G_SHEETS_SENDING_FILE); }
-  Serial.printf("[GSheet] Renaming '%s' to '%s'\n", G_SHEETS_QUEUE_FILE, G_SHEETS_SENDING_FILE);
   bool renamed = SD.rename(G_SHEETS_QUEUE_FILE, G_SHEETS_SENDING_FILE);
   xSemaphoreGive(sdMutex);
   if (!renamed) { Serial.println("ERROR: Could not rename queue file."); return; }
@@ -866,8 +976,6 @@ void sendDataToGoogleSheets() {
   } else { Serial.println("ERROR: Could not read sending file."); return; }
   if(payload.length() > 0) {
     HTTPClient http;
-    WiFiClientSecure client;
-    client.setInsecure();
     if (http.begin(client, GOOGLE_SCRIPT_ID)) {
       http.setTimeout(15000);
       http.addHeader("Content-Type", "text/plain");
@@ -905,11 +1013,9 @@ void syncUserListToSheets() {
   userFile.close();
   xSemaphoreGive(sdMutex);
   payload.trim();
-  if(payload.length() > strlen("USER_LIST_UPDATE\n")) {
+  if(payload.length() > strlen("USER_LIST_UPDATE")) {
     Serial.printf("[GSheet] Sending %d bytes of user data.\n", payload.length());
     HTTPClient http;
-    WiFiClientSecure client;
-    client.setInsecure();
     if (http.begin(client, GOOGLE_SCRIPT_ID)) {
       http.setTimeout(15000);
       http.addHeader("Content-Type", "text/plain");
@@ -930,6 +1036,7 @@ void logActivityToSd(String event, String uid, String name, unsigned long durati
     char logFilePath[40];
     strftime(logFilePath, sizeof(logFilePath), "/logs/%Y/%m/%d.csv", &timeinfo);
     Serial.printf("[SD] Attempting to log event to: %s\n", logFilePath);
+
     String dirPath = String(logFilePath).substring(0, String(logFilePath).lastIndexOf('/'));
     if(!SD.exists(dirPath)) {
         String root_path = LOGS_DIRECTORY;
@@ -938,6 +1045,7 @@ void logActivityToSd(String event, String uid, String name, unsigned long durati
         if(!SD.exists(year_path)) SD.mkdir(year_path);
         if(!SD.exists(dirPath)) SD.mkdir(dirPath);
     }
+
     String fullLogEntry = current_timestamp_str + "," + event + "," + uid + "," + name + "," + String(duration) + "," + formatDuration(duration);
     File localFile = SD.open(logFilePath, FILE_APPEND);
     if(localFile) {
@@ -1003,13 +1111,26 @@ void checkForDailyReset() {
     entryTime.clear();
     lastDay = timeinfo.tm_yday;
     Serial.println("[System] Daily reset performed for user status.");
+    sendTelegramLog("☀️ *Good Morning!* User statuses have been reset.");
   }
 }
 
 void playBuzzer(int status) {
-  if (status == 1) { tone(BUZZER_PIN, BEEP_FREQUENCY, 150); vTaskDelay(180/portTICK_PERIOD_MS); tone(BUZZER_PIN, BEEP_FREQUENCY, 400); } 
-  else if (status == 0) { tone(BUZZER_PIN, BEEP_FREQUENCY, 100); vTaskDelay(120/portTICK_PERIOD_MS); tone(BUZZER_PIN, BEEP_FREQUENCY, 100); vTaskDelay(120/portTICK_PERIOD_MS); tone(BUZZER_PIN, BEEP_FREQUENCY, 100); } 
-  else if (status == 2) { tone(BUZZER_PIN, BEEP_FREQUENCY, 1000); }
+  if (status == 1) { // ENTER
+    tone(BUZZER_PIN, BEEP_FREQUENCY, 150); 
+    vTaskDelay(180/portTICK_PERIOD_MS); 
+    tone(BUZZER_PIN, BEEP_FREQUENCY, 400); 
+  } 
+  else if (status == 0) { // EXIT
+    tone(BUZZER_PIN, BEEP_FREQUENCY, 100); 
+    vTaskDelay(120/portTICK_PERIOD_MS); 
+    tone(BUZZER_PIN, BEEP_FREQUENCY, 100); 
+    vTaskDelay(120/portTICK_PERIOD_MS); 
+    tone(BUZZER_PIN, BEEP_FREQUENCY, 100); 
+  } 
+  else if (status == 2) { // DENIED
+    tone(BUZZER_PIN, BEEP_FREQUENCY, 1000); 
+  }
 }
 
 void loadUsersFromSd() {
@@ -1076,23 +1197,15 @@ String formatDuration(unsigned long totalSeconds) {
   if (minutes > 0) formatted += String(minutes) + "m ";
   formatted += String(seconds) + "s";
   return formatted;
+
 }
 
-
-
-// --- OTA UPDATE HANDLERS ---
-void handleUpdate() {
-  server.sendHeader("Connection", "close");
-  server.send(200, "text/plain", (Update.hasError()) ? "UPDATE FAILED" : "Update Success! Rebooting...");
-  delay(1000);
-  ESP.restart();
-}
 
 void handleUpdateUpload() {
   HTTPUpload& upload = server.upload();
   if (upload.status == UPLOAD_FILE_START) {
     Serial.printf("Update: %s\n", upload.filename.c_str());
-    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { //start with max available size
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { // Gelen dosya boyutunu bilmediğimizi belirtiyoruz
       Update.printError(Serial);
     }
   } else if (upload.status == UPLOAD_FILE_WRITE) {
@@ -1100,104 +1213,10 @@ void handleUpdateUpload() {
       Update.printError(Serial);
     }
   } else if (upload.status == UPLOAD_FILE_END) {
-    if (Update.end(true)) { //true to set the size to the current progress
+    if (Update.end(true)) { // true parametresi ile güncellemenin başarılı olduğunu varsayıyoruz
       Serial.printf("Update Success: %u bytes\n", upload.totalSize);
     } else {
       Update.printError(Serial);
     }
   }
-}
-
-// --- FILE MANAGER & DOWNLOAD HANDLERS ---
-void listFiles(String& html, const char* dirname, int levels) {
-    File root = SD.open(dirname);
-    if (!root || !root.isDirectory()) return;
-    File file = root.openNextFile();
-    while (file) {
-        if (file.isDirectory()) {
-            if (levels > 0) listFiles(html, file.path(), levels - 1);
-        } else {
-            String filePath = String(file.path());
-            html += "<tr><td>" + filePath + "</td><td>" + String(file.size()) + " B</td>";
-            html += "<td><a href='/download?file=" + filePath + "' class='btn-delete' style='color:#81d4fa;'>Download</a></td></tr>";
-        }
-        file = root.openNextFile();
-    }
-}
-
-void handleFileDownload() {
-    // This page should be protected if an admin password is set
-    if (admin_pass.length() > 0) {
-      if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) return;
-    }
-
-    if (server.hasArg("file")) {
-        String path = server.arg("file");
-        // Basic security check
-        if (path.indexOf("..") != -1 || !path.startsWith("/")) {
-            server.send(400, "text/plain", "Invalid file path.");
-            return;
-        }
-
-        // --- YENİ EKLENEN BÖLÜM: DOSYA ADINI ÇIKARMA ---
-        String filename;
-        int lastSlash = path.lastIndexOf('/');
-        if (lastSlash != -1) {
-            filename = path.substring(lastSlash + 1);
-        } else {
-            filename = path;
-        }
-        // ---------------------------------------------
-        
-        xSemaphoreTake(sdMutex, portMAX_DELAY);
-        File file = SD.open(path, FILE_READ);
-        xSemaphoreGive(sdMutex);
-        
-        if (file) {
-            // --- YENİ EKLENEN BÖLÜM: TARAYICIYA DOSYA ADINI GÖNDERME ---
-            server.sendHeader("Content-Disposition", "attachment; filename=\"" + filename + "\"");
-            // --------------------------------------------------------
-            server.streamFile(file, "application/octet-stream");
-            file.close();
-        } else {
-            server.send(404, "text/plain", "File not found.");
-        }
-    } else {
-        server.send(400, "text/plain", "File parameter missing.");
-    }
-}
-
-// --- REAL-TIME LOGS HANDLER ---
-void handleGetLogs() {
-  struct tm timeinfo;
-  if(!getLocalTime(&timeinfo)){
-    server.send(500, "text/plain", "ERROR: Could not get time.");
-    return;
-  }
-  char logFilePath[40];
-  strftime(logFilePath, sizeof(logFilePath), "/logs/%Y/%m/%d.csv", &timeinfo);
-
-  String response = String(logFilePath) + "\n"; // Send filename as the first line
-
-  xSemaphoreTake(sdMutex, portMAX_DELAY);
-  File file = SD.open(logFilePath, FILE_READ);
-  if (!file || file.size() == 0) {
-    if(file) file.close();
-    xSemaphoreGive(sdMutex);
-    server.send(200, "text/plain", "FILE_NOT_FOUND:" + String(logFilePath));
-    return;
-  }
-  
-  // Skip header line of the CSV
-  if (file.available()) {
-    file.readStringUntil('\n');
-  }
-  
-  while(file.available()) {
-    response += file.readStringUntil('\n') + "\n";
-  }
-  file.close();
-  xSemaphoreGive(sdMutex);
-
-  server.send(200, "text/plain", response);
 }
