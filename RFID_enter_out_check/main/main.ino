@@ -285,6 +285,7 @@ void handleActivityLogs();
 void handleDownload();
 void startAPMode();
 void listDownloadableFiles(String& html, File dir);
+void sendTelegramNotification(String uid, String name, String action);
 
 
 //=========================================================
@@ -402,59 +403,91 @@ void Task_Network(void *pvParameters) {
 //=========================================================
 // RFID TASK (CORE 0)
 //=========================================================
+//=========================================================
+// RFID TASK (CORE 0) - with Telegram Notifications
+//=========================================================
 void Task_RFID(void *pvParameters) {
   Serial.println("[RFID Task] Started on Core 0.");
   struct tm timeinfo;
-  getLocalTime(&timeinfo, 10000);
-  if(timeinfo.tm_year > (2016 - 1900)) {
+  getLocalTime(&timeinfo, 10000); // Wait up to 10s for time sync
+  if(timeinfo.tm_year > (2016 - 1900)) { // Check if time is valid
     lastDay = timeinfo.tm_yday;
   }
   lastCardActivityTime = millis();
+
   for (;;) {
+    // Check if it's a new day to reset the in/out status
     checkForDailyReset();
+
+    // If a message was shown on the LCD, switch back to showing the time after a delay
     if (millis() - lastCardActivityTime > MESSAGE_DISPLAY_MS && currentDisplayState == SHOWING_MESSAGE) {
       currentDisplayState = SHOWING_TIME;
     }
+
+    // Update the LCD with the current date and time if no message is being shown
     if (currentDisplayState == SHOWING_TIME) {
       updateDisplayDateTime();
     }
+
+    // Clear the "Last Event" on the main dashboard after a timeout
     if (lastEventTimer > 0 && millis() - lastEventTimer > EVENT_TIMEOUT_MS) {
-      lastEventUID = "N/A"; lastEventName = "-"; lastEventAction = "-"; lastEventTime = "-";
+      lastEventUID = "N/A"; 
+      lastEventName = "-"; 
+      lastEventAction = "-"; 
+      lastEventTime = "-";
       lastEventTimer = 0;
     }
+
+    // Check for a new RFID card and read its serial number
     if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
       lastCardActivityTime = millis();
       currentDisplayState = SHOWING_MESSAGE;
+      
       String uid = getUIDString(rfid.uid);
       Serial.println("\n[RFID Task] Card Detected! UID: " + uid);
+      
       String name = getUserName(uid);
       time_t now = time(nullptr);
-      String fullTimestamp = getFormattedTime(now);
-      lastEventTime = fullTimestamp;
+      
+      // Update the global variables for the web dashboard's "Last Event" section
+      lastEventTime = getFormattedTime(now);
       lastEventUID = uid;
       lastEventName = name;
       lastEventTimer = millis();
+      
       if (name == "Unknown User") {
+        // --- Handle invalid card scans ---
         Serial.println("[RFID Task] UID not found in database. Access DENIED.");
         logInvalidAttemptToSd(uid);
-        playBuzzer(2);
+        playBuzzer(2); // Play "denied" sound
         lastEventAction = "INVALID";
         updateDisplayMessage("Access Denied", "");
+        sendTelegramNotification(uid, "Unknown User", "DENIED"); // Send Telegram alert
+
       } else {
+        // --- Handle valid card scans ---
         Serial.printf("[RFID Task] User identified: %s. Processing...\n", name.c_str());
+        
+        // Check if the same card was scanned again too quickly
         if (lastScanTime.count(uid) && (millis() - lastScanTime[uid] < CARD_COOLDOWN_SECONDS * 1000)) {
             Serial.println("[RFID Task] Cooldown active for this card. Ignoring scan.");
+            updateDisplayMessage("Please Wait", name);
         } else {
             bool isCurrentlyIn = userStatus[uid];
+
             if (!isCurrentlyIn) {
+              // --- Handle ENTER event ---
               Serial.println("[RFID Task] Action: ENTER");
               logActivityToSd("ENTER", uid, name, 0, now);
-              playBuzzer(1);
+              playBuzzer(1); // Play "enter" sound
               userStatus[uid] = true;
               entryTime[uid] = now;
               lastEventAction = "ENTER";
               updateDisplayMessage("Welcome", name);
+              sendTelegramNotification(uid, name, "ENTER"); // Send Telegram notification
+
             } else {
+              // --- Handle EXIT event ---
               Serial.println("[RFID Task] Action: EXIT");
               unsigned long duration = 0;
               time_t entry_time_val = 0;
@@ -464,17 +497,21 @@ void Task_RFID(void *pvParameters) {
                 entryTime.erase(uid);
               }
               logActivityToSd("EXIT", uid, name, duration, entry_time_val);
-              playBuzzer(0);
+              playBuzzer(0); // Play "exit" sound
               userStatus[uid] = false;
               lastEventAction = "EXIT";
               updateDisplayMessage("Goodbye", name);
+              sendTelegramNotification(uid, name, "EXIT"); // Send Telegram notification
             }
+            // Update the last scan time for this user to enforce the cooldown
             lastScanTime[uid] = millis();
         }
       }
+      // Halt the card and stop encryption to prepare for the next scan
       rfid.PICC_HaltA();
       rfid.PCD_StopCrypto1();
     }
+    // Small delay to prevent the task from consuming 100% of its CPU core
     vTaskDelay(50 / portTICK_PERIOD_MS);
   }
 }
@@ -1169,5 +1206,47 @@ void startAPMode() {
   for(;;) {
       server.handleClient();
       vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+}
+
+
+
+void sendTelegramNotification(String uid, String name, String action) {
+  // Only attempt to send if the device is connected to WiFi
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[Telegram] WiFi not connected. Skipping notification.");
+    return;
+  }
+
+  String message = "";
+  String formattedTime = getFormattedTime(time(nullptr));
+
+  if (action == "ENTER") {
+    message = "✅ *GİRİŞ YAPILDI* ✅\n\n";
+    message += "*İsim:* " + name + "\n";
+    message += "*UID:* `" + uid + "`\n";
+    message += "*Eylem:* GİRİŞ\n";
+    message += "*Zaman:* " + formattedTime;
+  } else if (action == "EXIT") {
+    message = "🚪 *ÇIKIŞ YAPILDI* 🚪\n\n";
+    message += "*İsim:* " + name + "\n";
+    message += "*UID:* `" + uid + "`\n";
+    message += "*Eylem:* ÇIKIŞ\n";
+    message += "*Zaman:* " + formattedTime;
+  } else if (action == "DENIED") {
+    message = "❌ *ERİŞİM REDDEDİLDİ* ❌\n\n";
+    message += "Tanınmayan bir kart okutuldu.\n";
+    message += "*UID:* `" + uid + "`\n";
+    message += "*Zaman:* " + formattedTime;
+  } else {
+    return; // Do not send for unknown actions
+  }
+
+  // Send the message using the bot library
+  Serial.println("[Telegram] Sending notification...");
+  if (bot.sendMessage(CHAT_ID, message, "Markdown")) {
+    Serial.println("[Telegram] Notification sent successfully.");
+  } else {
+    Serial.println("[Telegram] Failed to send notification.");
   }
 }
