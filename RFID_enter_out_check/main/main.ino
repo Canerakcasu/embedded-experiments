@@ -113,8 +113,7 @@ enum DisplayState { SHOWING_MESSAGE, SHOWING_TIME };
 DisplayState currentDisplayState = SHOWING_TIME;
 unsigned long lastCardActivityTime = 0;
 
-WiFiClientSecure client;
-UniversalTelegramBot bot(BOT_TOKEN, client);
+
 
 //=========================================================
 // WEB PAGE CONTENT (PROGMEM)
@@ -286,6 +285,7 @@ void handleDownload();
 void startAPMode();
 void listDownloadableFiles(String& html, File dir);
 void sendTelegramNotification(String uid, String name, String action);
+void sendSystemAlertToTelegram(String message);
 
 
 //=========================================================
@@ -293,7 +293,6 @@ void sendTelegramNotification(String uid, String name, String action);
 //=========================================================
 void setup() {
   Serial.begin(115200);
-  client.setInsecure(); // For Telegram and Google Sheets
   delay(1000);
   pinMode(BUZZER_PIN, OUTPUT);
   Serial.println("\n-- RFID Access System with WiFi Manager --");
@@ -339,12 +338,8 @@ void Task_Network(void *pvParameters) {
   Serial.println("[Network Task] Started on Core 1.");
   
   if (wifi_ssid.length() == 0) {
-    //--- SCENARIO 1: No WiFi credentials. Start AP for initial setup. ---
-    Serial.println("[Network Task] No WiFi config found. Starting AP for initial setup.");
-    startAPMode(); // Enters a permanent loop until restarted
-
+    startAPMode(); 
   } else {
-    //--- SCENARIO 2: WiFi credentials exist. Attempt to connect. ---
     Serial.print("[Network Task] Attempting to connect to WiFi: ");
     Serial.println(wifi_ssid);
     WiFi.mode(WIFI_STA);
@@ -358,15 +353,19 @@ void Task_Network(void *pvParameters) {
     }
 
     if (WiFi.status() != WL_CONNECTED) {
-      //--- SCENARIO 2a: Initial connection FAILED. Start AP. ---
       Serial.println("\n[Network Task] Initial connection failed. Starting AP for manual configuration.");
-      startAPMode(); // Enters a permanent loop until restarted
+      startAPMode();
     
     } else {
-      //--- SCENARIO 2b: Initial connection SUCCEEDED. Start normal operation. ---
       Serial.println("\n[Network Task] WiFi Connected!");
       Serial.print("[Network Task] IP Address: http://"); Serial.println(WiFi.localIP());
       updateDisplayMessage("WiFi Connected", WiFi.localIP().toString());
+      
+      // --- NEW: Send Telegram alert on successful connection ---
+      String alertMessage = "✅ *Sistem Wi-Fi Ağına Bağlandı* ✅\n\n";
+      alertMessage += "*SSID:* " + wifi_ssid + "\n";
+      alertMessage += "*IP Adresi:* `" + WiFi.localIP().toString() + "`";
+      sendSystemAlertToTelegram(alertMessage);
       
       setupTime();
       setupDashboardServer(); 
@@ -377,32 +376,28 @@ void Task_Network(void *pvParameters) {
       unsigned long lastUploadTime = 0;
       unsigned long lastUserFileSyncTime = 0;
 
-      // Main operational loop
       for (;;) {
-        
         if (WiFi.status() != WL_CONNECTED) {
-          //--- SCENARIO 3: Ongoing connection was LOST. Start recovery AP. ---
           Serial.println("\n[Network Task] Connection Lost! Starting AP for manual reconfiguration.");
-          startAPMode(); // Enters a permanent loop until restarted
+          // --- NEW: Send alert that connection was lost ---
+          alertMessage = "❌ *Sistemin Wi-Fi Bağlantısı Koptu!* ❌\n\n_Yeni ağ bilgisi için AP Modu başlatıldı._";
+          sendSystemAlertToTelegram(alertMessage);
+          startAPMode(); 
         }
 
-        // --- Normal Operations (when connected) ---
         server.handleClient();
-
         if (millis() - lastUploadTime > UPLOAD_INTERVAL_MS) {
           sendDataToGoogleSheets();
           lastUploadTime = millis();
         }
         if (millis() - lastUserFileSyncTime > USER_SYNC_INTERVAL_MS) {
+           // This periodic check remains as a fallback
         }
         vTaskDelay(10 / portTICK_PERIOD_MS);
       }
     }
   }
 }
-//=========================================================
-// RFID TASK (CORE 0)
-//=========================================================
 //=========================================================
 // RFID TASK (CORE 0) - with Telegram Notifications
 //=========================================================
@@ -803,6 +798,10 @@ void handleDeleteUser() {
   }
   if (server.hasArg("uid")) {
     String uidToDelete = server.arg("uid");
+    
+    // --- NEW: Get user's name before deleting for the notification ---
+    String nameOfDeletedUser = getUserName(uidToDelete);
+
     xSemaphoreTake(sdMutex, portMAX_DELAY);
     userStatus.erase(uidToDelete);
     entryTime.erase(uidToDelete);
@@ -820,10 +819,16 @@ void handleDeleteUser() {
     }
     xSemaphoreGive(sdMutex);
     loadUsersFromSd();
+
+    // --- NEW ---
+    // Immediately send Telegram alert and sync to Google Sheets
+    sendTelegramNotification(uidToDelete, nameOfDeletedUser, "USER_DELETED");
+    syncUserListToSheets();
   }
   server.sendHeader("Location", "/admin", true);
   server.send(302, "text/plain", "");
 }
+
 
 void handleAddUser() {
   if (add_user_pass.length() > 0) {
@@ -841,6 +846,11 @@ void handleAddUser() {
         }
         xSemaphoreGive(sdMutex);
         loadUsersFromSd();
+
+        // --- NEW ---
+        // Immediately send Telegram alert and sync to Google Sheets
+        sendTelegramNotification(uid, name, "USER_ADDED");
+        syncUserListToSheets();
     }
   }
   server.sendHeader("Location", "/adduserpage", true);
@@ -931,7 +941,6 @@ void sendDataToGoogleSheets() {
   xSemaphoreTake(sdMutex, portMAX_DELAY);
   if (!SD.exists(G_SHEETS_QUEUE_FILE)) { 
     xSemaphoreGive(sdMutex);
-    Serial.println("[GSheet] Queue file not found. Nothing to upload.");
     return;
   }
   File queueFile = SD.open(G_SHEETS_QUEUE_FILE, FILE_READ);
@@ -939,15 +948,14 @@ void sendDataToGoogleSheets() {
     if(queueFile) queueFile.close();
     SD.remove(G_SHEETS_QUEUE_FILE);
     xSemaphoreGive(sdMutex);
-    Serial.println("[GSheet] Queue file is empty. Nothing to upload.");
     return;
   }
   queueFile.close();
   if (SD.exists(G_SHEETS_SENDING_FILE)) { SD.remove(G_SHEETS_SENDING_FILE); }
-  Serial.printf("[GSheet] Renaming '%s' to '%s'\n", G_SHEETS_QUEUE_FILE, G_SHEETS_SENDING_FILE);
   bool renamed = SD.rename(G_SHEETS_QUEUE_FILE, G_SHEETS_SENDING_FILE);
   xSemaphoreGive(sdMutex);
   if (!renamed) { Serial.println("ERROR: Could not rename queue file."); return; }
+  
   xSemaphoreTake(sdMutex, portMAX_DELAY);
   File sendingFile = SD.open(G_SHEETS_SENDING_FILE, FILE_READ);
   xSemaphoreGive(sdMutex);
@@ -956,29 +964,25 @@ void sendDataToGoogleSheets() {
     while(sendingFile.available()){ payload += sendingFile.readStringUntil('\n') + "\n"; }
     sendingFile.close();
     payload.trim();
-    Serial.printf("[GSheet] Payload of %d bytes read from sending file.\n", payload.length());
   } else { Serial.println("ERROR: Could not read sending file."); return; }
+  
   if(payload.length() > 0) {
+    // --- NEW: Create a local, isolated client for this task ---
+    WiFiClientSecure localClient;
+    localClient.setInsecure();
     HTTPClient http;
-    WiFiClientSecure client;
-    client.setInsecure();
-    if (http.begin(client, GOOGLE_SCRIPT_ID)) {
+
+    if (http.begin(localClient, GOOGLE_SCRIPT_ID)) {
       http.setTimeout(15000);
       http.addHeader("Content-Type", "text/plain");
       Serial.println("[GSheet] Sending payload to Google Script...");
-      int httpCode = http.POST(payload);
-      if (httpCode > 0) {
-        Serial.printf("[GSheet] Upload finished with HTTP code: %d\n", httpCode);
-      } else {
-        Serial.printf("[GSheet] Upload failed, error: %s\n", http.errorToString(httpCode).c_str());
-      }
+      http.POST(payload);
       http.end();
-    } else { Serial.println("[GSheet] HTTP client failed to begin connection."); }
+    }
   }
   xSemaphoreTake(sdMutex, portMAX_DELAY);
   if(SD.exists(G_SHEETS_SENDING_FILE)) { 
     SD.remove(G_SHEETS_SENDING_FILE); 
-    Serial.printf("[GSheet] Temporary file '%s' deleted.\n", G_SHEETS_SENDING_FILE);
   }
   xSemaphoreGive(sdMutex);
 }
@@ -988,7 +992,6 @@ void syncUserListToSheets() {
   xSemaphoreTake(sdMutex, portMAX_DELAY);
   File userFile = SD.open(USER_DATABASE_FILE, FILE_READ);
   if (!userFile) { 
-    Serial.println("ERROR: Failed to open users.csv for syncing."); 
     xSemaphoreGive(sdMutex); 
     return; 
   }
@@ -999,12 +1002,15 @@ void syncUserListToSheets() {
   userFile.close();
   xSemaphoreGive(sdMutex);
   payload.trim();
-  if(payload.length() > strlen("USER_LIST_UPDATE\n")) {
-    Serial.printf("[GSheet] Sending %d bytes of user data.\n", payload.length());
+  
+  if(payload.length() > strlen("USER_LIST_UPDATE")) {
+    // --- NEW: Create a local, isolated client for this task ---
+    WiFiClientSecure localClient;
+    localClient.setInsecure();
     HTTPClient http;
-    WiFiClientSecure client;
-    client.setInsecure();
-    if (http.begin(client, GOOGLE_SCRIPT_ID)) {
+
+    Serial.printf("[GSheet] Sending %d bytes of user data.\n", payload.length());
+    if (http.begin(localClient, GOOGLE_SCRIPT_ID)) {
       http.setTimeout(15000);
       http.addHeader("Content-Type", "text/plain");
       int httpCode = http.POST(payload);
@@ -1015,6 +1021,7 @@ void syncUserListToSheets() {
       Serial.println("[GSheet] No users to sync.");
   }
 }
+
 
 void logActivityToSd(String event, String uid, String name, unsigned long duration, time_t event_time) {
   xSemaphoreTake(sdMutex, portMAX_DELAY);
@@ -1211,42 +1218,47 @@ void startAPMode() {
 
 
 
-void sendTelegramNotification(String uid, String name, String action) {
-  // Only attempt to send if the device is connected to WiFi
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[Telegram] WiFi not connected. Skipping notification.");
-    return;
+void sendSystemAlertToTelegram(String message) {
+  if (WiFi.status() != WL_CONNECTED) return;
+  
+  // --- NEW: Create a local, isolated client and bot for this task ---
+  WiFiClientSecure localClient;
+  localClient.setInsecure();
+  UniversalTelegramBot localBot(BOT_TOKEN, localClient);
+
+  Serial.println("[Telegram] Sending system alert...");
+  if (!localBot.sendMessage(CHAT_ID, message, "Markdown")) {
+    Serial.println("[Telegram] Failed to send system alert.");
   }
+}
+
+
+void sendTelegramNotification(String uid, String name, String action) {
+  if (WiFi.status() != WL_CONNECTED) return;
+  
+  WiFiClientSecure localClient;
+  localClient.setInsecure();
+  UniversalTelegramBot localBot(BOT_TOKEN, localClient);
 
   String message = "";
   String formattedTime = getFormattedTime(time(nullptr));
 
   if (action == "ENTER") {
-    message = "✅ *GİRİŞ YAPILDI* ✅\n\n";
-    message += "*İsim:* " + name + "\n";
-    message += "*UID:* `" + uid + "`\n";
-    message += "*Eylem:* GİRİŞ\n";
-    message += "*Zaman:* " + formattedTime;
+    message = "✅ *ENTERED* ✅\n\n*İsim:* " + name + "\n*UID:* `" + uid + "`\n*Zaman:* " + formattedTime;
   } else if (action == "EXIT") {
-    message = "🚪 *ÇIKIŞ YAPILDI* 🚪\n\n";
-    message += "*İsim:* " + name + "\n";
-    message += "*UID:* `" + uid + "`\n";
-    message += "*Eylem:* ÇIKIŞ\n";
-    message += "*Zaman:* " + formattedTime;
+    message = "🚪 *JUST LEFT* 🚪\n\n*İsim:* " + name + "\n*UID:* `" + uid + "`\n*Zaman:* " + formattedTime;
   } else if (action == "DENIED") {
-    message = "❌ *ERİŞİM REDDEDİLDİ* ❌\n\n";
-    message += "Tanınmayan bir kart okutuldu.\n";
-    message += "*UID:* `" + uid + "`\n";
-    message += "*Zaman:* " + formattedTime;
+    message = "❌ *INVALID USER!!* ❌\n\n*UID:* `" + uid + "`\n*Zaman:* " + formattedTime;
+  } else if (action == "USER_ADDED") {
+    message = "👤 *NEW USER ADDED* 👤\n\n*İsim:* " + name + "\n*UID:* `" + uid + "`";
+  } else if (action == "USER_DELETED") {
+    message = "🗑️ *USED DELETED* 🗑️\n\n*İsim:* " + name + "\n*UID:* `" + uid + "`";
   } else {
-    return; // Do not send for unknown actions
+    return;
   }
 
-  // Send the message using the bot library
   Serial.println("[Telegram] Sending notification...");
-  if (bot.sendMessage(CHAT_ID, message, "Markdown")) {
-    Serial.println("[Telegram] Notification sent successfully.");
-  } else {
+  if (!localBot.sendMessage(CHAT_ID, message, "Markdown")) {
     Serial.println("[Telegram] Failed to send notification.");
   }
 }
