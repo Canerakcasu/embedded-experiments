@@ -15,7 +15,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <EEPROM.h>
 #include <Update.h>
-#include <UniversalTelegramBot.h> // Telegram için gerekli
+#include <UniversalTelegramBot.h>
 
 //=========================================================
 // TASK & SEMAPHORE HANDLES
@@ -283,6 +283,7 @@ void handleNotFound();
 void handleFileManager();
 void handleActivityLogs();
 void handleDownload();
+void startAPMode();
 void listDownloadableFiles(String& html, File dir);
 
 
@@ -332,35 +333,22 @@ void setup() {
 }
 
 //=========================================================
-// NETWORK TASK (CORE 1) - with advanced recovery
-//=========================================================
+// NETWORK TASK (CORE 1) - Final version with correct AP page routing
 void Task_Network(void *pvParameters) {
   Serial.println("[Network Task] Started on Core 1.");
   
   if (wifi_ssid.length() == 0) {
-    //--- Initial Setup AP Mode ---
-    Serial.println("[Network Task] No WiFi config. Starting AP for setup.");
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(ap_ssid);
-    IPAddress apIP = WiFi.softAPIP();
-    Serial.print("[Network Task] AP Mode enabled. Connect to '");
-    Serial.print(ap_ssid);
-    Serial.print("' and go to http://");
-    Serial.println(apIP);
-    updateDisplayMessage("SETUP MODE", apIP.toString());
-    setupAPServer();
-    server.begin();
-    for(;;) {
-        server.handleClient();
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-    }
+    //--- SCENARIO 1: No WiFi credentials. Start AP for initial setup. ---
+    Serial.println("[Network Task] No WiFi config found. Starting AP for initial setup.");
+    startAPMode(); // Enters a permanent loop until restarted
+
   } else {
-    //--- Station (STA) Mode ---
+    //--- SCENARIO 2: WiFi credentials exist. Attempt to connect. ---
     Serial.print("[Network Task] Attempting to connect to WiFi: ");
     Serial.println(wifi_ssid);
     WiFi.mode(WIFI_STA);
     WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
+    
     int connection_attempts = 0;
     while (WiFi.status() != WL_CONNECTED && connection_attempts < 30) {
       vTaskDelay(500 / portTICK_PERIOD_MS);
@@ -369,92 +357,48 @@ void Task_Network(void *pvParameters) {
     }
 
     if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("\n[Network Task] Initial connection failed. Restarting...");
-      delay(3000);
-      ESP.restart();
-    }
+      //--- SCENARIO 2a: Initial connection FAILED. Start AP. ---
+      Serial.println("\n[Network Task] Initial connection failed. Starting AP for manual configuration.");
+      startAPMode(); // Enters a permanent loop until restarted
     
-    Serial.println("\n[Network Task] WiFi Connected!");
-    Serial.print("[Network Task] IP Address: http://"); Serial.println(WiFi.localIP());
-    updateDisplayMessage("WiFi Connected", WiFi.localIP().toString());
-    setupTime();
-    setupDashboardServer(); // Handlers for main dashboard
-    setupAPServer();        // Handlers for AP config page (needed for recovery)
-    server.begin();
-    Serial.println("[Network Task] Web Server started.");
-    syncUserListToSheets(); 
-    unsigned long lastUploadTime = 0;
-    unsigned long lastUserFileSyncTime = 0;
-
-    for (;;) { // Main operational loop
+    } else {
+      //--- SCENARIO 2b: Initial connection SUCCEEDED. Start normal operation. ---
+      Serial.println("\n[Network Task] WiFi Connected!");
+      Serial.print("[Network Task] IP Address: http://"); Serial.println(WiFi.localIP());
+      updateDisplayMessage("WiFi Connected", WiFi.localIP().toString());
       
-      if (WiFi.status() != WL_CONNECTED) {
-          //--- Recovery AP Mode ---
-          Serial.println("[Network Task] Connection Lost! Entering Recovery AP mode.");
-          updateDisplayMessage("CONN. LOST", "RECOVERY MODE");
-          
-          WiFi.mode(WIFI_AP_STA); // Switch to dual AP+STA mode
-          WiFi.softAP(ap_ssid);
-          
-          Serial.print("[Network Task] Recovery AP Started. IP: ");
-          Serial.println(WiFi.softAPIP());
+      setupTime();
+      setupDashboardServer(); 
+      server.begin();
+      Serial.println("[Network Task] Web Server started with Dashboard pages.");
 
-          unsigned long lastReconnectAttempt = 0;
+      syncUserListToSheets(); 
+      unsigned long lastUploadTime = 0;
+      unsigned long lastUserFileSyncTime = 0;
 
-          // Loop here until we reconnect
-          while (WiFi.status() != WL_CONNECTED) {
-              server.handleClient(); // Keep the web server running on the AP IP
-
-              if (millis() - lastReconnectAttempt > RECONNECT_INTERVAL_MS) {
-                  Serial.print("[Recovery] Trying to reconnect to ");
-                  Serial.println(wifi_ssid);
-                  WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str()); // Re-initiate connection
-                  lastReconnectAttempt = millis();
-              }
-              vTaskDelay(10 / portTICK_PERIOD_MS);
-          }
-
-          // If we exit the while loop, it means we have reconnected
-          Serial.println("\n[Network Task] Reconnection successful!");
-          Serial.print("[Network Task] New IP Address: http://");
-          Serial.println(WiFi.localIP());
-          updateDisplayMessage("WiFi Connected", WiFi.localIP().toString());
-          
-          WiFi.softAPdisconnect(true); // Turn off the recovery AP
-          WiFi.mode(WIFI_STA);         // Go back to pure station mode
-      }
-
-      // --- Normal Operations (when connected) ---
-      server.handleClient();
-
-      if (millis() - lastUploadTime > UPLOAD_INTERVAL_MS) {
-        sendDataToGoogleSheets();
-        lastUploadTime = millis();
-      }
-      if (millis() - lastUserFileSyncTime > USER_SYNC_INTERVAL_MS) {
-        xSemaphoreTake(sdMutex, portMAX_DELAY);
-        File userFile = SD.open(USER_DATABASE_FILE, FILE_READ);
-        if (userFile) {
-          if (userFile.size() != lastUserFileSize) {
-            Serial.printf("[Network Task] User file change detected. Syncing...\n");
-            lastUserFileSize = userFile.size();
-            userFile.close();
-            xSemaphoreGive(sdMutex); 
-            syncUserListToSheets(); 
-          } else {
-            userFile.close();
-            xSemaphoreGive(sdMutex);
-          }
-        } else {
-          xSemaphoreGive(sdMutex);
+      // Main operational loop
+      for (;;) {
+        
+        if (WiFi.status() != WL_CONNECTED) {
+          //--- SCENARIO 3: Ongoing connection was LOST. Start recovery AP. ---
+          Serial.println("\n[Network Task] Connection Lost! Starting AP for manual reconfiguration.");
+          startAPMode(); // Enters a permanent loop until restarted
         }
-        lastUserFileSyncTime = millis();
+
+        // --- Normal Operations (when connected) ---
+        server.handleClient();
+
+        if (millis() - lastUploadTime > UPLOAD_INTERVAL_MS) {
+          sendDataToGoogleSheets();
+          lastUploadTime = millis();
+        }
+        if (millis() - lastUserFileSyncTime > USER_SYNC_INTERVAL_MS) {
+        }
+        vTaskDelay(10 / portTICK_PERIOD_MS);
       }
-      vTaskDelay(10 / portTICK_PERIOD_MS);
     }
   }
 }
-
 //=========================================================
 // RFID TASK (CORE 0)
 //=========================================================
@@ -682,19 +626,26 @@ void handleAdmin() {
 void listDownloadableFiles(String& html, File dir) {
     while (true) {
         File entry = dir.openNextFile();
-        if (!entry) break;
-        
-        String entryName = String(entry.name());
+        if (!entry) {
+            break; // No more files in this directory
+        }
+
+        String path = entry.name();
+        // --- THE FIX ---
+        if (!path.startsWith("/")) {
+            path = "/" + path;
+        }
+
         if (entry.isDirectory()) {
-            listDownloadableFiles(html, entry);
+            listDownloadableFiles(html, entry); // Recurse into subdirectories
         } else {
-            String lowerCaseName = entryName;
-            lowerCaseName.toLowerCase();
-            if (lowerCaseName.endsWith(".csv") || lowerCaseName.endsWith(".txt")) {
+            String lowerCasePath = path;
+            lowerCasePath.toLowerCase();
+            if (lowerCasePath.endsWith(".csv") || lowerCasePath.endsWith(".txt")) {
                 html += "<tr>";
-                html += "<td>" + entryName + "</td>";
+                html += "<td>" + path + "</td>";
                 html += "<td>" + String(entry.size()) + "</td>";
-                html += "<td><a href='/download?file=" + entryName + "' style='color: #03dac6; font-weight:bold;'>Download</a></td>";
+                html += "<td><a href='/download?file=" + path + "' style='color: #03dac6; font-weight:bold;'>Download</a></td>";
                 html += "</tr>";
             }
         }
@@ -939,11 +890,93 @@ String readStringFromEEPROM(int addr, int maxLen) {
 }
 
 void sendDataToGoogleSheets() {
-  // Function remains the same
+  Serial.println("\n[GSheet] Checking for data to upload...");
+  xSemaphoreTake(sdMutex, portMAX_DELAY);
+  if (!SD.exists(G_SHEETS_QUEUE_FILE)) { 
+    xSemaphoreGive(sdMutex);
+    Serial.println("[GSheet] Queue file not found. Nothing to upload.");
+    return;
+  }
+  File queueFile = SD.open(G_SHEETS_QUEUE_FILE, FILE_READ);
+  if (!queueFile || queueFile.size() == 0) {
+    if(queueFile) queueFile.close();
+    SD.remove(G_SHEETS_QUEUE_FILE);
+    xSemaphoreGive(sdMutex);
+    Serial.println("[GSheet] Queue file is empty. Nothing to upload.");
+    return;
+  }
+  queueFile.close();
+  if (SD.exists(G_SHEETS_SENDING_FILE)) { SD.remove(G_SHEETS_SENDING_FILE); }
+  Serial.printf("[GSheet] Renaming '%s' to '%s'\n", G_SHEETS_QUEUE_FILE, G_SHEETS_SENDING_FILE);
+  bool renamed = SD.rename(G_SHEETS_QUEUE_FILE, G_SHEETS_SENDING_FILE);
+  xSemaphoreGive(sdMutex);
+  if (!renamed) { Serial.println("ERROR: Could not rename queue file."); return; }
+  xSemaphoreTake(sdMutex, portMAX_DELAY);
+  File sendingFile = SD.open(G_SHEETS_SENDING_FILE, FILE_READ);
+  xSemaphoreGive(sdMutex);
+  String payload = "";
+  if (sendingFile) {
+    while(sendingFile.available()){ payload += sendingFile.readStringUntil('\n') + "\n"; }
+    sendingFile.close();
+    payload.trim();
+    Serial.printf("[GSheet] Payload of %d bytes read from sending file.\n", payload.length());
+  } else { Serial.println("ERROR: Could not read sending file."); return; }
+  if(payload.length() > 0) {
+    HTTPClient http;
+    WiFiClientSecure client;
+    client.setInsecure();
+    if (http.begin(client, GOOGLE_SCRIPT_ID)) {
+      http.setTimeout(15000);
+      http.addHeader("Content-Type", "text/plain");
+      Serial.println("[GSheet] Sending payload to Google Script...");
+      int httpCode = http.POST(payload);
+      if (httpCode > 0) {
+        Serial.printf("[GSheet] Upload finished with HTTP code: %d\n", httpCode);
+      } else {
+        Serial.printf("[GSheet] Upload failed, error: %s\n", http.errorToString(httpCode).c_str());
+      }
+      http.end();
+    } else { Serial.println("[GSheet] HTTP client failed to begin connection."); }
+  }
+  xSemaphoreTake(sdMutex, portMAX_DELAY);
+  if(SD.exists(G_SHEETS_SENDING_FILE)) { 
+    SD.remove(G_SHEETS_SENDING_FILE); 
+    Serial.printf("[GSheet] Temporary file '%s' deleted.\n", G_SHEETS_SENDING_FILE);
+  }
+  xSemaphoreGive(sdMutex);
 }
 
 void syncUserListToSheets() {
-  // Function remains the same
+  Serial.println("[GSheet] Syncing user list to Google Sheets...");
+  xSemaphoreTake(sdMutex, portMAX_DELAY);
+  File userFile = SD.open(USER_DATABASE_FILE, FILE_READ);
+  if (!userFile) { 
+    Serial.println("ERROR: Failed to open users.csv for syncing."); 
+    xSemaphoreGive(sdMutex); 
+    return; 
+  }
+  String payload = "USER_LIST_UPDATE\n";
+  while(userFile.available()) {
+    payload += userFile.readStringUntil('\n') + "\n";
+  }
+  userFile.close();
+  xSemaphoreGive(sdMutex);
+  payload.trim();
+  if(payload.length() > strlen("USER_LIST_UPDATE\n")) {
+    Serial.printf("[GSheet] Sending %d bytes of user data.\n", payload.length());
+    HTTPClient http;
+    WiFiClientSecure client;
+    client.setInsecure();
+    if (http.begin(client, GOOGLE_SCRIPT_ID)) {
+      http.setTimeout(15000);
+      http.addHeader("Content-Type", "text/plain");
+      int httpCode = http.POST(payload);
+      Serial.printf("[GSheet] User list sync finished with HTTP code: %d\n", httpCode);
+      http.end();
+    }
+  } else {
+      Serial.println("[GSheet] No users to sync.");
+  }
 }
 
 void logActivityToSd(String event, String uid, String name, unsigned long duration, time_t event_time) {
@@ -1110,4 +1143,31 @@ String formatDuration(unsigned long totalSeconds) {
   if (minutes > 0) formatted += String(minutes) + "m ";
   formatted += String(seconds) + "s";
   return formatted;
+}
+
+
+void startAPMode() {
+  updateDisplayMessage("AP MODE ACTIVE", "Setup WiFi");
+  WiFi.disconnect(true);
+  delay(100);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ap_ssid);
+  
+  IPAddress apIP = WiFi.softAPIP();
+  Serial.println("\n[Network Task] Starting Access Point for manual configuration.");
+  Serial.print("[Network Task] Connect to SSID: '");
+  Serial.print(ap_ssid);
+  Serial.print("' and browse to http://");
+  Serial.println(apIP);
+  
+  updateDisplayMessage(ap_ssid, apIP.toString());
+  
+  setupAPServer();
+  server.begin();
+  Serial.println("[Network Task] Web Server configured for WiFi Setup.");
+  
+  for(;;) {
+      server.handleClient();
+      vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
 }
