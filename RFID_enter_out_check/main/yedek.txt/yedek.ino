@@ -16,6 +16,7 @@
 #include <EEPROM.h>
 #include <Update.h>
 #include <UniversalTelegramBot.h>
+#include <ESPmDNS.h>
 
 //=========================================================
 // TASK & SEMAPHORE HANDLES
@@ -139,7 +140,7 @@ form { margin-top: 20px; padding: 20px; border: 1px solid #333; border-radius: 8
 input[type=text], input[type=password] { width: calc(50% - 24px); padding: 10px; margin: 5px; border-radius: 4px; border: 1px solid #555; background: #333; color: #e0e0e0; }
 input[type=submit], button { padding: 10px 20px; border: none; border-radius: 4px; background: #03dac6; color: #121212; font-weight: bold; cursor: pointer; margin-top: 10px; transition: all 0.2s ease-in-out; }
 input[type=submit]:hover, button:hover { transform: translateY(-3px); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); }
-button.btn-reboot { background-color: #b00020; color: #fff; }
+button.btn-reboot { background-color:rgb(214, 238, 0); color: #fff; }
 .btn-delete { color: #cf6679; text-decoration: none; font-weight: bold; }
 .home-link { margin-bottom: 20px; display: inline-block; color: #bb86fc; font-size: 1.1em; }
 .status { padding: 5px 10px; border-radius: 15px; font-size: 0.85em; text-align: center; color: white; font-weight: bold; }
@@ -157,7 +158,7 @@ const char PAGE_Main[] PROGMEM = R"rawliteral(
 <h2>Last Event</h2><div class="data-grid">
 <span>Time:</span><span id="eventTime">-</span><span>Card UID:</span><span id="eventUID">-</span>
 <span>Name:</span><span id="eventName">-</span><span>Action:</span><span id="eventAction">-</span>
-</div><p class="footer-nav"><a href="/admin">Admin Panel</a> | <a href="/activity">Activity Logs</a> | <a href="/adduserpage">Add New User</a></p></div>
+</div><p class="footer-nav"><a href="/admin">Admin Panelll</a> | <a href="/activity">Activity Logs</a> | <a href="/adduserpage">Add New User</a></p></div>
 <script>
 function updateTime() { document.getElementById('currentTime').innerText = new Date().toLocaleTimeString('tr-TR'); }
 function fetchData() { fetch('/data').then(response => response.json()).then(data => {
@@ -218,6 +219,62 @@ function scanNetworks() {
   }).catch(e => { loader.style.display = 'none'; console.error(e); });
 }
 window.onload = scanNetworks;
+</script></body></html>
+)rawliteral";
+
+//=========================================================
+// WEB PAGE CONTENT (PROGMEM)
+//=========================================================
+
+// ... (Your existing PAGE_CSS, PAGE_Main, etc. go here) ...
+
+const char PAGE_OTA[] PROGMEM = R"rawliteral(
+<!DOCTYPE html><html><head><title>ESP32 Firmware Update</title><meta charset="UTF-8">
+<link href="/style.css" rel="stylesheet" type="text/css"></head>
+<body><div class="container" style="min-width: 500px;">
+<h1>Firmware Update (OTA)</h1><a href="/admin" class="home-link">&larr; Back to Admin Panel</a>
+<div id="upload-form" style="margin-top:20px;">
+<form method="POST" action="/update" enctype="multipart/form-data">
+  <input type="file" name="update" required>
+  <input type="submit" value="Upload & Update">
+</form>
+</div>
+<div id="progress-bar" style="display:none; margin-top: 20px;">
+  <p><strong>Uploading... Do not turn off the device!</strong></p>
+  <div style="background-color:#555; border-radius: 5px; padding: 3px;">
+    <div id="bar" style="background-color:#03dac6; width:0%; height:25px; border-radius: 3px; text-align:center; line-height:25px; color:#121212;">
+      <span id="progress-text">0%</span>
+    </div>
+  </div>
+</div>
+</div>
+<script>
+document.querySelector('form').addEventListener('submit', function(e) {
+  e.preventDefault();
+  var form = document.querySelector('form');
+  var data = new FormData(form);
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/update', true);
+  document.getElementById('upload-form').style.display = 'none';
+  document.getElementById('progress-bar').style.display = 'block';
+  xhr.upload.addEventListener('progress', function(e) {
+    if (e.lengthComputable) {
+      var percentComplete = (e.loaded / e.total) * 100;
+      document.getElementById('bar').style.width = percentComplete.toFixed(2) + '%';
+      document.getElementById('progress-text').innerText = percentComplete.toFixed(2) + '%';
+    }
+  });
+  xhr.onload = function() {
+    if (xhr.status === 200) {
+      alert('Update successful! The device will now reboot.');
+      document.getElementById('bar').style.backgroundColor = '#28a745';
+    } else {
+      alert('Update failed! Please check the file and try again.');
+      document.getElementById('bar').style.backgroundColor = '#b00020';
+    }
+  };
+  xhr.send(data);
+});
 </script></body></html>
 )rawliteral";
 
@@ -360,6 +417,13 @@ void Task_Network(void *pvParameters) {
       Serial.println("\n[Network Task] WiFi Connected!");
       Serial.print("[Network Task] IP Address: http://"); Serial.println(WiFi.localIP());
       updateDisplayMessage("WiFi Connected", WiFi.localIP().toString());
+      Serial.println("\n[Network Task] WiFi Connected!");
+    Serial.print("[Network Task] IP Address: http://"); Serial.println(WiFi.localIP());
+    updateDisplayMessage("WiFi Connected", WiFi.localIP().toString());
+      
+    // --- ADD THIS BLOCK TO START MDNS ---
+    if (MDNS.begin("rfid-system")) {
+        Serial.println("mDNS responder started: http://rfid-system.local");
       
       // --- NEW: Send Telegram alert on successful connection ---
       String alertMessage = "✅ *Sistem Wi-Fi Ağına Bağlandı* ✅\n\n";
@@ -397,6 +461,7 @@ void Task_Network(void *pvParameters) {
       }
     }
   }
+}
 }
 //=========================================================
 // RFID TASK (CORE 0) - with Telegram Notifications
@@ -554,11 +619,47 @@ void setupDashboardServer() {
   server.on("/reboot", HTTP_POST, handleReboot);
   server.on("/changepass", HTTP_POST, handleChangePassword);
   server.on("/changeadduserpass", HTTP_POST, handleChangeAddUserPassword);
-  
   server.on("/filemanager", HTTP_GET, handleFileManager);
   server.on("/activity", HTTP_GET, handleActivityLogs);
   server.on("/download", HTTP_GET, handleDownload);
-  
+
+  // --- OTA UPDATE HANDLERS ---
+  // Serve the OTA update page at /update
+  server.on("/update", HTTP_GET, []() {
+    if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) {
+      return server.requestAuthentication();
+    }
+    server.send_P(200, "text/html", PAGE_OTA);
+  });
+
+  // Handle the firmware file upload
+  server.on("/update", HTTP_POST, []() {
+    if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) {
+      return server.requestAuthentication();
+    }
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");
+    ESP.restart();
+  }, []() {
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+      Serial.printf("OTA Update Start: %s\n", upload.filename.c_str());
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+        Update.printError(Serial);
+      }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+        Update.printError(Serial);
+      }
+    } else if (upload.status == UPLOAD_FILE_END) {
+      if (Update.end(true)) {
+        Serial.printf("OTA Update Success: %u bytes\n", upload.totalSize);
+      } else {
+        Update.printError(Serial);
+      }
+    }
+  });
+
   server.onNotFound(handleNotFound);
 }
 
@@ -648,8 +749,15 @@ void handleAdmin() {
     html += "<td><a href='/deleteuser?uid=" + uid + "' class='btn-delete' onclick='return confirm(\"Are you sure?\");'>Delete</a></td></tr>";
  }
  html += "</table>";
+ 
  html += "<h2>Device Management</h2>";
  html += "<p style='margin-top:15px;'><a href='/filemanager' style='background-color:#fff; color:#121212; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold;'>File Manager</a></p>";
+
+ // --- OTA UPDATE SECTION ---
+ html += "<h3 style='margin-top: 40px;'>Firmware Update (OTA)</h3>";
+ html += "<p>Update the device firmware directly from your browser.</p>";
+ html += "<form action='/update' method='get'><button>Go to Update Page</button></form>";
+ 
  html += "<form action='/reboot' method='post' onsubmit='return confirm(\"Reboot the device?\");' style='margin-top:40px;'><button class='btn-reboot'>Reboot Device</button></form>";
  html += "</div></body></html>";
  server.send(200, "text/html", html);
@@ -692,7 +800,7 @@ void handleFileManager() {
     }
   }
   String html = "<html><head><title>File Manager</title><meta charset='UTF-8'><link href='/style.css' rel='stylesheet' type='text/css'></head><body><div class='container'>";
-  html += "<h1>File Manager (csv/txt)</h1><a href='/admin' class='home-link'>&larr; Back to Admin Panel</a>";
+  html += "<h1>File Manager (csv/txt)</h1><a href='/admin' class='home-link'>&larr; Back to Admin Panell</a>";
   html += "<h2>Downloadable Files</h2>";
   html += "<table><tr><th>File Path</th><th>Size (Bytes)</th><th>Action</th></tr>";
   

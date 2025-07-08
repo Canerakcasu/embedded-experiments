@@ -1,0 +1,28 @@
+lcd 
+
+
+gnd gnd
+vcc 5v
+sda 13
+scl 14
+
+sd card reader
+cs 5
+vcc 5v
+mosi 27
+miso 26
+vcc 5v
+gnd gnd
+
+
+rfid
+
+ss/sda 15
+sck 18
+mosi 23
+miso 19
+rst 22
+
+
+buzzer 
+32
