@@ -23,6 +23,7 @@
 TaskHandle_t Task_Network_Handle;
 TaskHandle_t Task_RFID_Handle;
 SemaphoreHandle_t sdMutex;
+SemaphoreHandle_t lcdMutex;
 
 //=========================================================
 // HARDWARE PINS & CONSTANTS
@@ -31,7 +32,7 @@ SemaphoreHandle_t sdMutex;
 #define BUZZER_PIN 32
 #define CARD_COOLDOWN_SECONDS 5
 #define EVENT_TIMEOUT_MS 3000
-#define MESSAGE_DISPLAY_MS 5000
+#define MESSAGE_DISPLAY_MS 2000
 #define RECONNECT_INTERVAL_MS 60000 // Reconnect attempt every 60 seconds
 
 #define RST_PIN         22
@@ -50,8 +51,8 @@ const int I2C_SCL_PIN = 14;
 //=========================================================
 // TELEGRAM & API SETTINGS
 //=========================================================
-#define BOT_TOKEN "7725746632:AAEGXEQVS1qTTuLZ5eg6YDoJj9nN87tkbgc" 
-#define CHAT_ID "5721778314" 
+#define BOT_TOKEN "7725746632:AAEGXEQVS1qTTuLZ5eg6YDoJj9nN87tkbgc"
+#define CHAT_ID "5721778314"
 const char* GOOGLE_SCRIPT_ID = "https://script.google.com/macros/s/AKfycby1vGdWeMxtKsf0mf4i98NEv_NmrrHkRSRZ5-IMXtgSmRvFoyPZToPoie28pv-td8SnkQ/exec";
 
 //=========================================================
@@ -64,7 +65,7 @@ const char* GOOGLE_SCRIPT_ID = "https://script.google.com/macros/s/AKfycby1vGdWe
 #define G_SHEETS_SENDING_FILE   "/upload_sending.csv"
 #define TEMP_USER_FILE          "/temp_users.csv"
 #define UPLOAD_INTERVAL_MS 60000
-#define USER_SYNC_INTERVAL_MS 60000
+#define USER_SYNC_INTERVAL_MS 3600000 // Sync users every hour
 #define EEPROM_SIZE 512
 
 #define EEPROM_WIFI_SSID_ADDR       0
@@ -100,6 +101,11 @@ SPIClass hspi(HSPI);
 LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
 MFRC522 rfid(SS_PIN, RST_PIN);
 WebServer server(80);
+
+String cachedScanResults = "[]";
+unsigned long lastWifiScanTime = 0;
+const unsigned long WIFI_SCAN_CACHE_DURATION_MS = 30000;
+
 std::map<String, String> userDatabase;
 std::map<String, bool> userStatus;
 std::map<String, unsigned long> lastScanTime;
@@ -107,13 +113,10 @@ std::map<String, time_t> entryTime;
 String lastEventUID = "N/A", lastEventName = "-", lastEventAction = "-", lastEventTime = "-";
 int lastDay = -1;
 unsigned long lastEventTimer = 0;
-long lastUserFileSize = 0;
 
 enum DisplayState { SHOWING_MESSAGE, SHOWING_TIME };
 DisplayState currentDisplayState = SHOWING_TIME;
 unsigned long lastCardActivityTime = 0;
-
-
 
 //=========================================================
 // WEB PAGE CONTENT (PROGMEM)
@@ -159,7 +162,7 @@ const char PAGE_Main[] PROGMEM = R"rawliteral(
 <span>Name:</span><span id="eventName">-</span><span>Action:</span><span id="eventAction">-</span>
 </div><p class="footer-nav"><a href="/admin">Admin Panel</a> | <a href="/activity">Activity Logs</a> | <a href="/adduserpage">Add New User</a></p></div>
 <script>
-function updateTime() { document.getElementById('currentTime').innerText = new Date().toLocaleTimeString('tr-TR'); }
+function updateTime() { document.getElementById('currentTime').innerText = new Date().toLocaleTimeString('pl-PL'); }
 function fetchData() { fetch('/data').then(response => response.json()).then(data => {
     document.getElementById('eventTime').innerText = data.time;
     document.getElementById('eventUID').innerText = data.uid;
@@ -199,20 +202,20 @@ function scanNetworks() {
     loader.style.display = 'none';
     if(data.length > 0) table.style.display = 'table';
     let newTbody = table.getElementsByTagName('tbody')[0];
-    if(!newTbody) { 
-        newTbody = document.createElement('tbody'); 
+    if(!newTbody) {
+        newTbody = document.createElement('tbody');
         let head = table.createTHead(); let hRow = head.insertRow(0);
         let th1 = document.createElement('th'); let th2 = document.createElement('th');
         th1.innerHTML = "Network Name (SSID)"; th2.innerHTML = "Signal Strength";
         hRow.appendChild(th1); hRow.appendChild(th2);
-        table.appendChild(newTbody); 
+        table.appendChild(newTbody);
     }
     data.sort((a, b) => b.rssi - a.rssi);
     data.forEach(net => {
       let row = newTbody.insertRow(); row.style.cursor = 'pointer';
       row.onclick = () => selectSsid(net.ssid);
       let cell1 = row.insertCell(0); let cell2 = row.insertCell(1);
-      cell1.innerHTML = net.ssid + (net.secure ? ' &#128274;' : '');
+      cell1.innerHTML = net.ssid + (net.secure === "true" ? ' &#128274;' : '');
       cell2.innerText = net.rssi + ' dBm'; cell2.style.textAlign = 'right';
     });
   }).catch(e => { loader.style.display = 'none'; console.error(e); });
@@ -230,17 +233,93 @@ Card UID: <input type='text' id='uid_field' name='uid' required><br>
 Name: <input type='text' name='name' required><br><br>
 <input type='submit' value='Add User'></form></div>
 <script>
+let lastKnownUID = "N/A";
 function getLastUID() {
  fetch('/getlastuid').then(response => response.text()).then(uid => {
-   if (uid && uid !== "N/A" && uid !== lastEventUID) {
+   if (uid && uid !== "N/A" && uid !== lastKnownUID) {
+     lastKnownUID = uid;
      document.getElementById('lastUID').innerText = uid;
      document.getElementById('uid_field').value = uid;
    }
  });
 }
-var lastEventUID = document.getElementById('lastUID').innerText;
 setInterval(getLastUID, 1000); window.onload = getLastUID;
 </script></body></html>
+)rawliteral";
+
+const char PAGE_OTA_UPDATE[] PROGMEM = R"rawliteral(
+<!DOCTYPE html><html><head><title>OTA Update</title><meta charset='UTF-8'><link href='/style.css' rel='stylesheet' type='text/css'></head>
+<body><div class='container'><h1>Firmware Update</h1><a href='/admin' class='home-link'>&larr; Back to Admin Panel</a>
+<form method='POST' action='/update' enctype='multipart/form-data' id='upload_form'>
+  <input type='file' name='update' id='file_input' accept='.bin'>
+  <input type='submit' value='Update Firmware'>
+</form>
+<div id='prg_wrap' style='border: 1px solid #03dac6; padding: 5px; margin-top: 20px; display: none;'>
+  <div id='prg' style='background-color: #03dac6; width: 0%; height: 20px;'></div>
+</div>
+<p id='prg_msg' style='margin-top: 10px; color: #03dac6;'></p>
+<script>
+  var form = document.getElementById('upload_form');
+  var fileInput = document.getElementById('file_input');
+  var prgWrap = document.getElementById('prg_wrap');
+  var prg = document.getElementById('prg');
+  var prgMsg = document.getElementById('prg_msg');
+
+  form.addEventListener('submit', function(e) {
+    e.preventDefault();
+    if (!fileInput.files.length) {
+      prgMsg.innerHTML = 'Please select a firmware file (.bin) to upload.';
+      return;
+    }
+    prgWrap.style.display = 'block';
+    prg.style.width = '0%';
+    prgMsg.innerHTML = 'Uploading...';
+
+    var file = fileInput.files[0];
+    var formData = new FormData();
+    formData.append('update', file);
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/update', true);
+
+    xhr.upload.addEventListener('progress', function(e) {
+      if (e.lengthComputable) {
+        var percent = Math.round((e.loaded / e.total) * 100);
+        prg.style.width = percent + '%';
+        prgMsg.innerHTML = 'Uploading: ' + percent + '%';
+      }
+    });
+
+    xhr.onreadystatechange = function() {
+      if (xhr.readyState === 4) {
+        if (xhr.status === 200) {
+          prg.style.width = '100%';
+          prgMsg.innerHTML = 'Update successful! Device rebooting...';
+          setTimeout(function() { window.location.href = '/'; }, 5000);
+        } else {
+          prg.style.width = '0%';
+          prgMsg.innerHTML = 'Update failed! Error: ' + xhr.responseText;
+        }
+      }
+    };
+    xhr.send(formData);
+  });
+</script></body></html>
+)rawliteral";
+
+const char PAGE_WIFI_CONFIG[] PROGMEM = R"rawliteral(
+<!DOCTYPE html><html><head><title>WiFi Configuration</title><meta charset='UTF-8'><link href='/style.css' rel='stylesheet' type='text/css'></head>
+<body><div class='container'><h1>WiFi Configuration</h1><a href='/admin' class='home-link'>&larr; Back to Admin Panel</a>
+<form action='/savewificonfig' method='POST'>
+<h3>Enter New WiFi Credentials</h3>
+SSID:<br><input type='text' name='ssid' required style='width: 100%; box-sizing: border-box;'><br><br>
+Password:<br><input type='password' name='pass' style='width: 100%; box-sizing: border-box;'><br><br>
+<input type='submit' value='Save and Restart'>
+</form>
+<p style='font-size:0.8em; color:#777; margin-top:30px; border-top:1px solid #444; padding-top:15px;'>
+  <b>Note:</b> After saving, the device will restart and attempt to connect to the new network.
+</p>
+</div></body></html>
 )rawliteral";
 
 //=========================================================
@@ -268,7 +347,6 @@ void setupAPServer();
 void Task_Network(void *pvParameters);
 void Task_RFID(void *pvParameters);
 void handleRoot();
-void handleCSS();
 void handleData();
 void handleAdmin();
 void handleDeleteUser();
@@ -283,9 +361,12 @@ void handleFileManager();
 void handleActivityLogs();
 void handleDownload();
 void startAPMode();
-void listDownloadableFiles(String& html, File dir);
+void listDownloadableFiles(File dir, String currentPath);
 void sendTelegramNotification(String uid, String name, String action);
 void sendSystemAlertToTelegram(String message);
+void handleUpdatePage();
+void handleWifiConfigPage();
+void handleSaveWifiConfig();
 
 
 //=========================================================
@@ -297,32 +378,31 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT);
   Serial.println("\n-- RFID Access System with WiFi Manager --");
 
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN); 
-  
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+
+  xSemaphoreTake(lcdMutex, portMAX_DELAY);
   lcd.init();
   lcd.backlight();
   Serial.println("16x2 I2C LCD initialized.");
   lcd.setCursor(0,0);
-  lcd.print("System Ready");
-  delay(2000);
-  
-  sdMutex = xSemaphoreCreateMutex();
-  if (sdMutex == NULL) { Serial.println("ERROR: Mutex can not be created."); while(1); }
+  lcd.print("System Loading..");
+  xSemaphoreGive(lcdMutex);
+  delay(100);
 
-  SPI.begin();  
+  sdMutex = xSemaphoreCreateMutex();
+  if (sdMutex == NULL) { Serial.println("ERROR: SD Mutex can not be created."); while(1); }
+  lcdMutex = xSemaphoreCreateMutex();
+  if (lcdMutex == NULL) { Serial.println("ERROR: LCD Mutex can not be created."); while(1); }
+
+  SPI.begin();
   hspi.begin(HSPI_SCK_PIN, HSPI_MISO_PIN, HSPI_MOSI_PIN);
-  
+
   xSemaphoreTake(sdMutex, portMAX_DELAY);
-  if (!SD.begin(SD_CS_PIN, hspi)) { Serial.println("FATAL: SD Card Mount Failed!"); while(1); }
-  File userFile = SD.open(USER_DATABASE_FILE);
-  if (userFile) {
-    lastUserFileSize = userFile.size();
-    userFile.close();
-  }
+  if (!SD.begin(SD_CS_PIN, hspi)) { Serial.println("FATAL: SD Card Mount Failed!"); lcd.clear(); lcd.print("SD Card Error!"); while(1); }
   xSemaphoreGive(sdMutex);
 
   rfid.PCD_Init();
-  
+
   loadCredentials();
   loadUsersFromSd();
 
@@ -332,108 +412,146 @@ void setup() {
   Serial.println("Tasks created. System starting...");
 }
 
+
 //=========================================================
-// NETWORK TASK (CORE 1) - Final version with correct AP page routing
+// NETWORK TASK (CORE 1) - Rewritten for stability
+//=========================================================
+//=========================================================
+// NETWORK TASK (CORE 1) - *** AP MODE BUG FIXED ***
+//=========================================================
 void Task_Network(void *pvParameters) {
   Serial.println("[Network Task] Started on Core 1.");
-  
+
+  bool sta_mode_initialized = false;
+  unsigned long lastUploadTime = 0;
+  unsigned long lastUserFileSyncTime = 0;
+  bool ap_mode_active = false;
+
+  // Initial Check: If no SSID, go straight to AP mode
   if (wifi_ssid.length() == 0) {
-    startAPMode(); 
+    startAPMode();
+    ap_mode_active = true;
   } else {
-    Serial.print("[Network Task] Attempting to connect to WiFi: ");
-    Serial.println(wifi_ssid);
+    // Attempt to connect to saved WiFi
     WiFi.mode(WIFI_STA);
     WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
-    
-    int connection_attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && connection_attempts < 30) {
-      vTaskDelay(500 / portTICK_PERIOD_MS);
-      Serial.print(".");
-      connection_attempts++;
+    Serial.print("[Network Task] Trying to connect to ");
+    Serial.println(wifi_ssid);
+    updateDisplayMessage("Connecting to", wifi_ssid);
+
+    // Wait for 10 seconds for the initial connection
+    int wait_count = 0;
+    while(WiFi.status() != WL_CONNECTED && wait_count < 20) { // 20 * 500ms = 10s
+        vTaskDelay(500 / portTICK_PERIOD_MS);
+        Serial.print(".");
+        wait_count++;
     }
 
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("\n[Network Task] Initial connection failed. Starting AP for manual configuration.");
-      startAPMode();
-    
-    } else {
-      Serial.println("\n[Network Task] WiFi Connected!");
-      Serial.print("[Network Task] IP Address: http://"); Serial.println(WiFi.localIP());
-      updateDisplayMessage("WiFi Connected", WiFi.localIP().toString());
-      
-      // --- NEW: Send Telegram alert on successful connection ---
-      String alertMessage = "✅ *Sistem Wi-Fi Ağına Bağlandı* ✅\n\n";
-      alertMessage += "*SSID:* " + wifi_ssid + "\n";
-      alertMessage += "*IP Adresi:* `" + WiFi.localIP().toString() + "`";
-      sendSystemAlertToTelegram(alertMessage);
-      
-      setupTime();
-      setupDashboardServer(); 
-      server.begin();
-      Serial.println("[Network Task] Web Server started with Dashboard pages.");
-
-      syncUserListToSheets(); 
-      unsigned long lastUploadTime = 0;
-      unsigned long lastUserFileSyncTime = 0;
-
-      for (;;) {
-        if (WiFi.status() != WL_CONNECTED) {
-          Serial.println("\n[Network Task] Connection Lost! Starting AP for manual reconfiguration.");
-          // --- NEW: Send alert that connection was lost ---
-          alertMessage = "❌ *Sistemin Wi-Fi Bağlantısı Koptu!* ❌\n\n_Yeni ağ bilgisi için AP Modu başlatıldı._";
-          sendSystemAlertToTelegram(alertMessage);
-          startAPMode(); 
-        }
-
-        server.handleClient();
-        if (millis() - lastUploadTime > UPLOAD_INTERVAL_MS) {
-          sendDataToGoogleSheets();
-          lastUploadTime = millis();
-        }
-        if (millis() - lastUserFileSyncTime > USER_SYNC_INTERVAL_MS) {
-           // This periodic check remains as a fallback
-        }
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-      }
+    if(WiFi.status() != WL_CONNECTED) {
+        Serial.println("\n[Network Task] Initial connection failed. Starting AP mode.");
+        sendSystemAlertToTelegram("❌ *Initial Connection Failed!* ❌\n\n_Starting Access Point for manual configuration._");
+        startAPMode();
+        ap_mode_active = true;
     }
   }
+
+  for (;;) {
+    server.handleClient();
+
+    if (ap_mode_active) {
+        // AP mode is active, do nothing else.
+    } else {
+        if (WiFi.status() == WL_CONNECTED) {
+            if (!sta_mode_initialized) {
+                // --- This block runs once on successful connection ---
+                Serial.println("\n[Network Task] WiFi Connected!");
+                Serial.print("[Network Task] IP Address: http://"); Serial.println(WiFi.localIP());
+                updateDisplayMessage("WiFi Connected", WiFi.localIP().toString());
+
+                String alertMessage = "✅ *System Connected to WiFi* ✅\n\n";
+                alertMessage += "*SSID:* " + wifi_ssid + "\n";
+                alertMessage += "*IP Address:* `" + WiFi.localIP().toString() + "`";
+                sendSystemAlertToTelegram(alertMessage);
+
+                server.close(); // Clear old handlers (if any) from AP mode
+                setupTime();
+                setupDashboardServer();
+                server.begin();
+                Serial.println("[Network Task] Web Server started with Dashboard pages.");
+                syncUserListToSheets(); // Initial sync on connection
+                sta_mode_initialized = true;
+            }
+
+            // --- Regular operations while connected (STA mode) ---
+            if (millis() - lastUploadTime > UPLOAD_INTERVAL_MS) {
+                sendDataToGoogleSheets();
+                lastUploadTime = millis();
+            }
+            if (millis() - lastUserFileSyncTime > USER_SYNC_INTERVAL_MS) {
+                syncUserListToSheets();
+                lastUserFileSyncTime = millis();
+            }
+        } else {
+            // --- Connection Lost ---
+            Serial.println("\n[Network Task] Connection Lost! Attempting to reconnect...");
+            sendSystemAlertToTelegram("❌ *System WiFi Connection Lost!* ❌\n\n_Attempting to reconnect..._");
+            updateDisplayMessage("Reconnecting...", wifi_ssid);
+            WiFi.reconnect();
+
+            // Wait for 10 seconds for reconnection
+            int wait_count = 0;
+            while(WiFi.status() != WL_CONNECTED && wait_count < 20) { // 20 * 500ms = 10s
+                vTaskDelay(500 / portTICK_PERIOD_MS);
+                Serial.print(".");
+                wait_count++;
+            }
+
+            if(WiFi.status() != WL_CONNECTED) {
+                Serial.println("\n[Network Task] Reconnect failed. Starting AP mode.");
+                sendSystemAlertToTelegram("❌ *Reconnect Failed!* ❌\n\n_Starting Access Point for manual configuration._");
+                startAPMode();
+                ap_mode_active = true; // Switch to AP mode
+            } else {
+                // Reconnected successfully, let the main loop re-initialize
+                sta_mode_initialized = false;
+            }
+        }
+    }
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
 }
+
 //=========================================================
-// RFID TASK (CORE 0) - with Telegram Notifications
+// RFID TASK (CORE 0) - No major changes needed, already efficient
 //=========================================================
 void Task_RFID(void *pvParameters) {
   Serial.println("[RFID Task] Started on Core 0.");
   struct tm timeinfo;
   getLocalTime(&timeinfo, 10000); // Wait up to 10s for time sync
-  if(timeinfo.tm_year > (2016 - 1900)) { // Check if time is valid
+  if(timeinfo.tm_year > (2016 - 1900)) {
     lastDay = timeinfo.tm_yday;
   }
   lastCardActivityTime = millis();
 
   for (;;) {
-    // Check if it's a new day to reset the in/out status
     checkForDailyReset();
 
-    // If a message was shown on the LCD, switch back to showing the time after a delay
     if (millis() - lastCardActivityTime > MESSAGE_DISPLAY_MS && currentDisplayState == SHOWING_MESSAGE) {
       currentDisplayState = SHOWING_TIME;
     }
 
-    // Update the LCD with the current date and time if no message is being shown
     if (currentDisplayState == SHOWING_TIME) {
       updateDisplayDateTime();
     }
 
-    // Clear the "Last Event" on the main dashboard after a timeout
     if (lastEventTimer > 0 && millis() - lastEventTimer > EVENT_TIMEOUT_MS) {
-      lastEventUID = "N/A"; 
-      lastEventName = "-"; 
-      lastEventAction = "-"; 
+      lastEventUID = "N/A";
+      lastEventName = "-";
+      lastEventAction = "-";
       lastEventTime = "-";
       lastEventTimer = 0;
     }
 
-    // Check for a new RFID card and read its serial number
     if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
       lastCardActivityTime = millis();
       currentDisplayState = SHOWING_MESSAGE;
@@ -444,69 +562,57 @@ void Task_RFID(void *pvParameters) {
       String name = getUserName(uid);
       time_t now = time(nullptr);
       
-      // Update the global variables for the web dashboard's "Last Event" section
       lastEventTime = getFormattedTime(now);
       lastEventUID = uid;
       lastEventName = name;
       lastEventTimer = millis();
       
       if (name == "Unknown User") {
-        // --- Handle invalid card scans ---
         Serial.println("[RFID Task] UID not found in database. Access DENIED.");
         logInvalidAttemptToSd(uid);
-        playBuzzer(2); // Play "denied" sound
+        playBuzzer(2); // Denied sound
         lastEventAction = "INVALID";
         updateDisplayMessage("Access Denied", "");
-        sendTelegramNotification(uid, "Unknown User", "DENIED"); // Send Telegram alert
+        sendTelegramNotification(uid, "Unknown User", "DENIED");
 
       } else {
-        // --- Handle valid card scans ---
         Serial.printf("[RFID Task] User identified: %s. Processing...\n", name.c_str());
         
-        // Check if the same card was scanned again too quickly
         if (lastScanTime.count(uid) && (millis() - lastScanTime[uid] < CARD_COOLDOWN_SECONDS * 1000)) {
             Serial.println("[RFID Task] Cooldown active for this card. Ignoring scan.");
             updateDisplayMessage("Please Wait", name);
         } else {
-            bool isCurrentlyIn = userStatus[uid];
+            bool isCurrentlyIn = userStatus.count(uid) ? userStatus[uid] : false;
 
             if (!isCurrentlyIn) {
-              // --- Handle ENTER event ---
               Serial.println("[RFID Task] Action: ENTER");
               logActivityToSd("ENTER", uid, name, 0, now);
-              playBuzzer(1); // Play "enter" sound
+              playBuzzer(1); // Enter sound
               userStatus[uid] = true;
               entryTime[uid] = now;
               lastEventAction = "ENTER";
               updateDisplayMessage("Welcome", name);
-              sendTelegramNotification(uid, name, "ENTER"); // Send Telegram notification
+              sendTelegramNotification(uid, name, "ENTER");
 
             } else {
-              // --- Handle EXIT event ---
               Serial.println("[RFID Task] Action: EXIT");
-              unsigned long duration = 0;
-              time_t entry_time_val = 0;
-              if(entryTime.count(uid)){
-                duration = now - entryTime[uid];
-                entry_time_val = entryTime[uid];
-                entryTime.erase(uid);
-              }
+              unsigned long duration = entryTime.count(uid) ? (now - entryTime[uid]) : 0;
+              time_t entry_time_val = entryTime.count(uid) ? entryTime[uid] : now;
+              
               logActivityToSd("EXIT", uid, name, duration, entry_time_val);
-              playBuzzer(0); // Play "exit" sound
+              playBuzzer(0); // Exit sound
               userStatus[uid] = false;
+              if (entryTime.count(uid)) entryTime.erase(uid);
               lastEventAction = "EXIT";
               updateDisplayMessage("Goodbye", name);
-              sendTelegramNotification(uid, name, "EXIT"); // Send Telegram notification
+              sendTelegramNotification(uid, name, "EXIT");
             }
-            // Update the last scan time for this user to enforce the cooldown
             lastScanTime[uid] = millis();
         }
       }
-      // Halt the card and stop encryption to prepare for the next scan
       rfid.PICC_HaltA();
       rfid.PCD_StopCrypto1();
     }
-    // Small delay to prevent the task from consuming 100% of its CPU core
     vTaskDelay(50 / portTICK_PERIOD_MS);
   }
 }
@@ -515,7 +621,7 @@ void Task_RFID(void *pvParameters) {
 // MAIN LOOP
 //=========================================================
 void loop() {
-  vTaskDelete(NULL); // FreeRTOS is used, so the main loop is empty.
+  vTaskDelete(NULL); // FreeRTOS handles everything, main loop is not needed.
 }
 
 
@@ -548,16 +654,36 @@ void setupDashboardServer() {
   server.on("/admin", HTTP_GET, handleAdmin);
   server.on("/adduserpage", HTTP_GET, handleAddUserPage);
   server.on("/getlastuid", HTTP_GET, handleGetLastUID);
-  server.on("/style.css", HTTP_GET, handleCSS);
+  server.on("/style.css", HTTP_GET, [](){ server.send_P(200, "text/css", PAGE_CSS); });
   server.on("/adduser", HTTP_POST, handleAddUser);
   server.on("/deleteuser", HTTP_GET, handleDeleteUser);
   server.on("/reboot", HTTP_POST, handleReboot);
   server.on("/changepass", HTTP_POST, handleChangePassword);
   server.on("/changeadduserpass", HTTP_POST, handleChangeAddUserPassword);
-  
-  server.on("/filemanager", HTTP_GET, handleFileManager);
+  server.on("/filemanager", HTTP_GET, handleFileManager); // Corrected sServer typo here
   server.on("/activity", HTTP_GET, handleActivityLogs);
   server.on("/download", HTTP_GET, handleDownload);
+
+  server.on("/update", HTTP_GET, handleUpdatePage);
+  server.on("/update", HTTP_POST, []() {
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");
+    ESP.restart();
+  }, []() {
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+      Serial.printf("Update: %s\n", upload.filename.c_str());
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { Update.printError(Serial); }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) { Update.printError(Serial); }
+    } else if (upload.status == UPLOAD_FILE_END) {
+      if (Update.end(true)) { Serial.printf("Update Success: %u bytes\n", upload.totalSize); }
+      else { Update.printError(Serial); }
+    }
+  });
+
+  server.on("/wificonfig", HTTP_GET, handleWifiConfigPage);
+  server.on("/savewificonfig", HTTP_POST, handleSaveWifiConfig);
   
   server.onNotFound(handleNotFound);
 }
@@ -568,33 +694,38 @@ void setupAPServer() {
         wifi_ssid = server.arg("ssid");
         wifi_pass = server.arg("pass");
         Serial.printf("[AP Mode] New WiFi credentials received: SSID = %s\n", wifi_ssid.c_str());
-        
+
         EEPROM.begin(EEPROM_SIZE);
         writeStringToEEPROM(EEPROM_WIFI_SSID_ADDR, wifi_ssid);
         writeStringToEEPROM(EEPROM_WIFI_PASS_ADDR, wifi_pass);
         EEPROM.commit();
         EEPROM.end();
-        
+
         server.send(200, "text/html", "<h2>Settings Saved!</h2><p>Device will restart with new settings in 5 seconds.</p>");
         delay(5000);
         ESP.restart();
     });
     server.on("/scan", HTTP_GET, [](){
-        int n = WiFi.scanNetworks();
-        String json = "[";
-        for (int i = 0; i < n; ++i) {
-            if (i > 0) json += ",";
-            json += "{\"rssi\":" + String(WiFi.RSSI(i)) + ",\"ssid\":\"" + WiFi.SSID(i) + "\",\"secure\":" + String(WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "false" : "true") + "}";
+        if (millis() - lastWifiScanTime > WIFI_SCAN_CACHE_DURATION_MS) {
+            Serial.println("[AP Scan] Performing new WiFi scan...");
+            int n = WiFi.scanNetworks();
+            String json = "[";
+            for (int i = 0; i < n; ++i) {
+                if (i > 0) json += ",";
+                json += R"({"rssi":)" + String(WiFi.RSSI(i)) + R"(,"ssid":")" + WiFi.SSID(i) + R"(","secure":")" + String(WiFi.encryptionType(i) != WIFI_AUTH_OPEN) + R"("})";
+            }
+            json += "]";
+            cachedScanResults = json;
+            lastWifiScanTime = millis();
+        } else {
+            Serial.println("[AP Scan] Serving cached WiFi scan results.");
         }
-        json += "]";
-        server.send(200, "application/json", json);
+        server.send(200, "application/json", cachedScanResults);
     });
-    // Ensure CSS is available in AP mode too
-    server.on("/style.css", HTTP_GET, handleCSS); 
+    server.on("/style.css", HTTP_GET, [](){ server.send_P(200, "text/css", PAGE_CSS); });
 }
 
 void handleRoot() { server.send_P(200, "text/html", PAGE_Main); }
-void handleCSS() { server.send_P(200, "text/css", PAGE_CSS); }
 
 void handleData() {
   StaticJsonDocument<256> doc;
@@ -602,13 +733,8 @@ void handleData() {
   doc["uid"] = lastEventUID;
   doc["name"] = lastEventName;
   doc["action"] = lastEventAction;
+  doc["ssid"] = (WiFi.status() == WL_CONNECTED) ? wifi_ssid : "DISCONNECTED";
 
-  if (WiFi.status() == WL_CONNECTED){
-    doc["ssid"] = wifi_ssid;
-  } else {
-    doc["ssid"] = "DISCONNECTED";
-  }
-  
   String json;
   serializeJson(doc, json);
   server.send(200, "application/json", json);
@@ -616,8 +742,8 @@ void handleData() {
 
 void handleAddUserPage() {
   if (add_user_pass.length() > 0) {
-    if (!server.authenticate(add_user_user.c_str(), add_user_pass.c_str())) { 
-      return server.requestAuthentication(); 
+    if (!server.authenticate(add_user_user.c_str(), add_user_pass.c_str())) {
+      return server.requestAuthentication();
     }
   }
   lastEventUID = "N/A";
@@ -630,55 +756,69 @@ void handleGetLastUID() {
 
 void handleAdmin() {
   if (admin_pass.length() > 0) {
-    if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) { 
-      return server.requestAuthentication(); 
-    }
+     if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) { return server.requestAuthentication(); }
   }
- String html = "<html><head><title>Admin Panel</title><meta charset='UTF-8'><link href='/style.css' rel='stylesheet' type='text/css'></head><body><div class='container'>";
- html += "<h1>Admin Panel</h1><a href='/' class='home-link'>&larr; Back to Dashboard</a>";
- html += "<h2>Security Settings</h2>";
- html += "<h3>Admin Access</h3>";
- html += "<form action='/changepass' method='post'>Admin Username: <input type='text' name='admin_user' value='" + admin_user + "'><br>New Admin Password: <input type='password' name='admin_pass'><br><small>To remove password, leave blank and save.</small><br><input type='submit' value='Save Admin Settings'></form>";
- html += "<h3>'Add User' Page Access</h3>";
- html += "<form action='/changeadduserpass' method='post'>'Add User' Username: <input type='text' name='add_user_user' value='" + add_user_user + "'><br>New 'Add User' Password: <input type='password' name='add_user_pass'><br><small>To remove password, leave blank and save.</small><br><input type='submit' value='Save User Settings'></form>";
- html += "<h2>User Management</h2>";
- html += "<table><tr><th>UID</th><th>Name</th><th>Current Status</th><th>Action</th></tr>";
- for (auto const& [uid, name] : userDatabase) {
-    html += "<tr><td>" + uid + "</td><td>" + name + "</td><td>" + (userStatus[uid] ? "<span class='status status-in'>INSIDE</span>" : "<span class='status status-out'>OUTSIDE</span>") + "</td>";
-    html += "<td><a href='/deleteuser?uid=" + uid + "' class='btn-delete' onclick='return confirm(\"Are you sure?\");'>Delete</a></td></tr>";
- }
- html += "</table>";
- html += "<h2>Device Management</h2>";
- html += "<p style='margin-top:15px;'><a href='/filemanager' style='background-color:#fff; color:#121212; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold;'>File Manager</a></p>";
- html += "<form action='/reboot' method='post' onsubmit='return confirm(\"Reboot the device?\");' style='margin-top:40px;'><button class='btn-reboot'>Reboot Device</button></form>";
- html += "</div></body></html>";
- server.send(200, "text/html", html);
+
+  // OPTIMIZED: Send response in chunks to avoid large String allocation
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  String head;
+  head.reserve(1024);
+  head = "<html><head><title>Admin Panel</title><meta charset='UTF-8'><link href='/style.css' rel='stylesheet' type='text/css'></head><body><div class='container'>";
+  head += "<h1>Admin Panel</h1><a href='/' class='home-link'>&larr; Back to Dashboard</a>";
+  head += "<h2>Security Settings</h2>";
+  head += "<h3>Admin Access</h3>";
+  head += "<form action='/changepass' method='post'>Admin Username: <input type='text' name='admin_user' value='" + admin_user + "'><br>New Admin Password: <input type='password' name='admin_pass'><br><small>To remove password, leave blank and save.</small><br><input type='submit' value='Save Admin Settings'></form>";
+  head += "<h3>'Add User' Page Access</h3>";
+  head += "<form action='/changeadduserpass' method='post'>'Add User' Username: <input type='text' name='add_user_user' value='" + add_user_user + "'><br>New 'Add User' Password: <input type='password' name='add_user_pass'><br><small>To remove password, leave blank and save.</small><br><input type='submit' value='Save User Settings'></form>";
+  server.send(200, "text/html", head);
+
+  String table_header;
+  table_header.reserve(256);
+  table_header += "<h2>User Management</h2>";
+  table_header += "<table><tr><th>UID</th><th>Name</th><th>Current Status</th><th>Action</th></tr>";
+  server.sendContent(table_header);
+
+  for (auto const& [uid, name] : userDatabase) {
+    String row;
+    row.reserve(256);
+    row = "<tr><td>" + uid + "</td><td>" + name + "</td><td>" + (userStatus.count(uid) && userStatus[uid] ? "<span class='status status-in'>INSIDE</span>" : "<span class='status status-out'>OUTSIDE</span>") + "</td>";
+    row += "<td><a href='/deleteuser?uid=" + uid + "' class='btn-delete' onclick='return confirm(\"Are you sure?\");'>Delete</a></td></tr>";
+    server.sendContent(row);
+  }
+
+  String footer;
+  footer.reserve(1024);
+  footer += "</table>";
+  footer += "<h2>Device Management</h2>";
+  footer += "<p style='margin-top:15px;'><a href='/filemanager' style='background-color:#03dac6; color:#121212; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold;'>File Manager</a></p>";
+  footer += "<p style='margin-top:15px;'><a href='/wificonfig' style='background-color:#03dac6; color:#121212; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold;'>WiFi Configuration</a></p>";
+  footer += "<p style='margin-top:15px;'><a href='/update' style='background-color:#03dac6; color:#121212; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold;'>Firmware Update (OTA)</a></p>";
+  footer += "<form action='/reboot' method='post' onsubmit='return confirm(\"Reboot the device?\");' style='margin-top:40px;'><button class='btn-reboot'>Reboot Device</button></form>";
+  footer += "</div></body></html>";
+  server.sendContent(footer);
+  server.sendContent(""); // Finalize the response
 }
 
-void listDownloadableFiles(String& html, File dir) {
+void listDownloadableFiles(File dir, String currentPath) {
     while (true) {
         File entry = dir.openNextFile();
-        if (!entry) {
-            break; // No more files in this directory
-        }
+        if (!entry) break;
 
-        String path = entry.name();
-        // --- THE FIX ---
-        if (!path.startsWith("/")) {
-            path = "/" + path;
-        }
+        String entryName = entry.name();
+        String fullPath = currentPath + entryName;
 
         if (entry.isDirectory()) {
-            listDownloadableFiles(html, entry); // Recurse into subdirectories
+            listDownloadableFiles(entry, fullPath + "/");
         } else {
-            String lowerCasePath = path;
+            String lowerCasePath = fullPath;
             lowerCasePath.toLowerCase();
             if (lowerCasePath.endsWith(".csv") || lowerCasePath.endsWith(".txt")) {
-                html += "<tr>";
-                html += "<td>" + path + "</td>";
-                html += "<td>" + String(entry.size()) + "</td>";
-                html += "<td><a href='/download?file=" + path + "' style='color: #03dac6; font-weight:bold;'>Download</a></td>";
-                html += "</tr>";
+                String row;
+                row.reserve(256);
+                row = "<tr><td>" + fullPath + "</td>";
+                row += "<td>" + String(entry.size()) + "</td>";
+                row += "<td><a href='/download?file=" + fullPath + "' style='color: #03dac6; font-weight:bold;'>Download</a></td></tr>";
+                server.sendContent(row); // Send row by row
             }
         }
         entry.close();
@@ -687,41 +827,47 @@ void listDownloadableFiles(String& html, File dir) {
 
 void handleFileManager() {
   if (admin_pass.length() > 0) {
-    if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) {
-      return server.requestAuthentication();
-    }
+    if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) { return server.requestAuthentication(); }
   }
-  String html = "<html><head><title>File Manager</title><meta charset='UTF-8'><link href='/style.css' rel='stylesheet' type='text/css'></head><body><div class='container'>";
-  html += "<h1>File Manager (csv/txt)</h1><a href='/admin' class='home-link'>&larr; Back to Admin Panel</a>";
-  html += "<h2>Downloadable Files</h2>";
-  html += "<table><tr><th>File Path</th><th>Size (Bytes)</th><th>Action</th></tr>";
+  // OPTIMIZED: Stream response
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  String head;
+  head.reserve(512);
+  head = "<html><head><title>File Manager</title><meta charset='UTF-8'><link href='/style.css' rel='stylesheet' type='text/css'></head><body><div class='container'>";
+  head += "<h1>File Manager (csv/txt)</h1><a href='/admin' class='home-link'>&larr; Back to Admin Panel</a>";
+  head += "<h2>Downloadable Files</h2>";
+  head += "<table><tr><th>File Path</th><th>Size (Bytes)</th><th>Action</th></tr>";
+  server.send(200, "text/html", head);
   
   xSemaphoreTake(sdMutex, portMAX_DELAY);
   File root = SD.open("/");
   if(root){
-    listDownloadableFiles(html, root);
+    listDownloadableFiles(root, "/");
     root.close();
   }
   xSemaphoreGive(sdMutex);
   
-  html += "</table>";
-  html += "</div></body></html>";
-  server.send(200, "text/html", html);
+  server.sendContent("</table></div></body></html>");
+  server.sendContent("");
 }
+
 
 void handleActivityLogs() {
   if (admin_pass.length() > 0) {
-    if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) {
-      return server.requestAuthentication();
-    }
+    if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) { return server.requestAuthentication(); }
   }
 
-  String html = "<html><head><title>Today's Activity</title><meta charset='UTF-8'><link href='/style.css' rel='stylesheet' type='text/css'></head><body><div class='container'>";
-  html += "<h1>Today's Activity Log</h1><a href='/' class='home-link'>&larr; Back to Dashboard</a>";
+  // OPTIMIZED: Stream response
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  String head;
+  head.reserve(512);
+  head = "<html><head><title>Today's Activity</title><meta charset='UTF-8'><link href='/style.css' rel='stylesheet' type='text/css'></head><body><div class='container'>";
+  head += "<h1>Today's Activity Log</h1><a href='/' class='home-link'>&larr; Back to Dashboard</a>";
+  server.send(200, "text/html", head);
 
   struct tm timeinfo;
   if (!getLocalTime(&timeinfo, 2000)) {
-    html += "<h2>Error: System time not set. Cannot retrieve logs.</h2>";
+    server.sendContent("<h2>Error: System time not set. Cannot retrieve logs.</h2>");
   } else {
     char logFilePath[40];
     strftime(logFilePath, sizeof(logFilePath), "/logs/%Y-%m-%d.csv", &timeinfo);
@@ -731,42 +877,42 @@ void handleActivityLogs() {
     xSemaphoreGive(sdMutex);
 
     if (logFile && logFile.size() > 0) {
-        html += "<h2>Log for: " + String(logFilePath) + "</h2>";
-        html += "<table>";
+        server.sendContent("<h2>Log for: " + String(logFilePath) + "</h2><table>");
         bool isHeader = true;
         while(logFile.available()) {
             String line = logFile.readStringUntil('\n');
             line.trim();
             if (line.length() == 0) continue;
 
-            html += "<tr>";
+            String row_html;
+            row_html.reserve(256);
+            row_html += "<tr>";
             int lastIndex = 0;
             int commaIndex = line.indexOf(',');
             while(commaIndex != -1) {
-                html += (isHeader ? "<th>" : "<td>") + line.substring(lastIndex, commaIndex) + (isHeader ? "</th>" : "</td>");
+                row_html += (isHeader ? "<th>" : "<td>") + line.substring(lastIndex, commaIndex) + (isHeader ? "</th>" : "</td>");
                 lastIndex = commaIndex + 1;
                 commaIndex = line.indexOf(',', lastIndex);
             }
-            html += (isHeader ? "<th>" : "<td>") + line.substring(lastIndex) + (isHeader ? "</th>" : "</td>");
-            html += "</tr>";
+            row_html += (isHeader ? "<th>" : "<td>") + line.substring(lastIndex) + (isHeader ? "</th>" : "</td>");
+            row_html += "</tr>";
+            server.sendContent(row_html);
             isHeader = false;
         }
-        html += "</table>";
+        server.sendContent("</table>");
         logFile.close();
     } else {
-        html += "<h2>No activity has been recorded today.</h2>";
+        server.sendContent("<h2>No activity has been recorded today.</h2>");
     }
   }
-
-  html += "</div></body></html>";
-  server.send(200, "text/html", html);
+  server.sendContent("</div></body></html>");
+  server.sendContent("");
 }
+
 
 void handleDownload() {
   if (admin_pass.length() > 0) {
-    if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) {
-      return server.requestAuthentication();
-    }
+    if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) { return; }
   }
   if (server.hasArg("file")) {
     String filePath = server.arg("file");
@@ -798,11 +944,10 @@ void handleDeleteUser() {
   }
   if (server.hasArg("uid")) {
     String uidToDelete = server.arg("uid");
-    
-    // --- NEW: Get user's name before deleting for the notification ---
     String nameOfDeletedUser = getUserName(uidToDelete);
 
     xSemaphoreTake(sdMutex, portMAX_DELAY);
+    userDatabase.erase(uidToDelete);
     userStatus.erase(uidToDelete);
     entryTime.erase(uidToDelete);
     File originalFile = SD.open(USER_DATABASE_FILE, FILE_READ);
@@ -812,16 +957,13 @@ void handleDeleteUser() {
             String line = originalFile.readStringUntil('\n');
             if (line.length() > 0 && !line.startsWith(uidToDelete + ",")) { tempFile.println(line); }
         }
-        originalFile.close(); 
+        originalFile.close();
         tempFile.close();
         SD.remove(USER_DATABASE_FILE);
         SD.rename(TEMP_USER_FILE, USER_DATABASE_FILE);
     }
     xSemaphoreGive(sdMutex);
-    loadUsersFromSd();
 
-    // --- NEW ---
-    // Immediately send Telegram alert and sync to Google Sheets
     sendTelegramNotification(uidToDelete, nameOfDeletedUser, "USER_DELETED");
     syncUserListToSheets();
   }
@@ -838,17 +980,15 @@ void handleAddUser() {
     String uid = server.arg("uid"); String name = server.arg("name");
     uid.trim(); name.trim();
     if(uid.length() > 0 && name.length() > 0) {
+        userDatabase[uid] = name; // Update map immediately for responsiveness
         xSemaphoreTake(sdMutex, portMAX_DELAY);
         File file = SD.open(USER_DATABASE_FILE, FILE_APPEND);
-        if (file) { 
-            file.println(uid + "," + name); 
-            file.close(); 
+        if (file) {
+            file.println(uid + "," + name);
+            file.close();
         }
         xSemaphoreGive(sdMutex);
-        loadUsersFromSd();
 
-        // --- NEW ---
-        // Immediately send Telegram alert and sync to Google Sheets
         sendTelegramNotification(uid, name, "USER_ADDED");
         syncUserListToSheets();
     }
@@ -912,6 +1052,42 @@ void handleChangeAddUserPassword() {
 
 void handleNotFound() { server.send(404, "text/plain", "404: Not Found"); }
 
+void handleUpdatePage() {
+  if (admin_pass.length() > 0) {
+    if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) { return server.requestAuthentication(); }
+  }
+  server.send_P(200, "text/html", PAGE_OTA_UPDATE);
+}
+
+void handleWifiConfigPage() {
+  if (admin_pass.length() > 0) {
+    if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) { return server.requestAuthentication(); }
+  }
+  server.send_P(200, "text/html", PAGE_WIFI_CONFIG);
+}
+
+void handleSaveWifiConfig() {
+  if (admin_pass.length() > 0) {
+    if (!server.authenticate(admin_user.c_str(), admin_pass.c_str())) { return; }
+  }
+  if (server.hasArg("ssid") && server.hasArg("pass")) {
+    String new_ssid = server.arg("ssid");
+    String new_pass = server.arg("pass");
+    
+    EEPROM.begin(EEPROM_SIZE);
+    writeStringToEEPROM(EEPROM_WIFI_SSID_ADDR, new_ssid);
+    writeStringToEEPROM(EEPROM_WIFI_PASS_ADDR, new_pass);
+    EEPROM.commit();
+    EEPROM.end();
+    
+    server.send(200, "text/html", "<h2>Settings Saved!</h2><p>Device will restart with new settings in 5 seconds.</p>");
+    delay(5000);
+    ESP.restart();
+  } else {
+    server.send(400, "text/plain", "Bad Request: Missing SSID or Password.");
+  }
+}
+
 //=========================================================
 // HELPER FUNCTIONS
 //=========================================================
@@ -939,7 +1115,7 @@ String readStringFromEEPROM(int addr, int maxLen) {
 void sendDataToGoogleSheets() {
   Serial.println("\n[GSheet] Checking for data to upload...");
   xSemaphoreTake(sdMutex, portMAX_DELAY);
-  if (!SD.exists(G_SHEETS_QUEUE_FILE)) { 
+  if (!SD.exists(G_SHEETS_QUEUE_FILE)) {
     xSemaphoreGive(sdMutex);
     return;
   }
@@ -954,20 +1130,13 @@ void sendDataToGoogleSheets() {
   if (SD.exists(G_SHEETS_SENDING_FILE)) { SD.remove(G_SHEETS_SENDING_FILE); }
   bool renamed = SD.rename(G_SHEETS_QUEUE_FILE, G_SHEETS_SENDING_FILE);
   xSemaphoreGive(sdMutex);
-  if (!renamed) { Serial.println("ERROR: Could not rename queue file."); return; }
-  
+  if (!renamed) { Serial.println("[GSheet] ERROR: Could not rename queue file."); return; }
+
   xSemaphoreTake(sdMutex, portMAX_DELAY);
   File sendingFile = SD.open(G_SHEETS_SENDING_FILE, FILE_READ);
   xSemaphoreGive(sdMutex);
-  String payload = "";
+
   if (sendingFile) {
-    while(sendingFile.available()){ payload += sendingFile.readStringUntil('\n') + "\n"; }
-    sendingFile.close();
-    payload.trim();
-  } else { Serial.println("ERROR: Could not read sending file."); return; }
-  
-  if(payload.length() > 0) {
-    // --- NEW: Create a local, isolated client for this task ---
     WiFiClientSecure localClient;
     localClient.setInsecure();
     HTTPClient http;
@@ -975,25 +1144,31 @@ void sendDataToGoogleSheets() {
     if (http.begin(localClient, GOOGLE_SCRIPT_ID)) {
       http.setTimeout(15000);
       http.addHeader("Content-Type", "text/plain");
-      Serial.println("[GSheet] Sending payload to Google Script...");
-      http.POST(payload);
+      int httpCode = http.sendRequest("POST", &sendingFile, sendingFile.size());
+      if(httpCode > 0) {
+          Serial.printf("[GSheet] Upload successful, code: %d\n", httpCode);
+          xSemaphoreTake(sdMutex, portMAX_DELAY);
+          if(SD.exists(G_SHEETS_SENDING_FILE)) { SD.remove(G_SHEETS_SENDING_FILE); }
+          xSemaphoreGive(sdMutex);
+      } else {
+          Serial.printf("[GSheet] Upload failed, error: %s\n", http.errorToString(httpCode).c_str());
+          xSemaphoreTake(sdMutex, portMAX_DELAY);
+          SD.rename(G_SHEETS_SENDING_FILE, G_SHEETS_QUEUE_FILE); // Rename back to try again later
+          xSemaphoreGive(sdMutex);
+      }
       http.end();
     }
-  }
-  xSemaphoreTake(sdMutex, portMAX_DELAY);
-  if(SD.exists(G_SHEETS_SENDING_FILE)) { 
-    SD.remove(G_SHEETS_SENDING_FILE); 
-  }
-  xSemaphoreGive(sdMutex);
+    sendingFile.close();
+  } else { Serial.println("[GSheet] ERROR: Could not read sending file."); }
 }
 
 void syncUserListToSheets() {
   Serial.println("[GSheet] Syncing user list to Google Sheets...");
   xSemaphoreTake(sdMutex, portMAX_DELAY);
   File userFile = SD.open(USER_DATABASE_FILE, FILE_READ);
-  if (!userFile) { 
-    xSemaphoreGive(sdMutex); 
-    return; 
+  if (!userFile) {
+    xSemaphoreGive(sdMutex);
+    return;
   }
   String payload = "USER_LIST_UPDATE\n";
   while(userFile.available()) {
@@ -1002,14 +1177,11 @@ void syncUserListToSheets() {
   userFile.close();
   xSemaphoreGive(sdMutex);
   payload.trim();
-  
+
   if(payload.length() > strlen("USER_LIST_UPDATE")) {
-    // --- NEW: Create a local, isolated client for this task ---
     WiFiClientSecure localClient;
     localClient.setInsecure();
     HTTPClient http;
-
-    Serial.printf("[GSheet] Sending %d bytes of user data.\n", payload.length());
     if (http.begin(localClient, GOOGLE_SCRIPT_ID)) {
       http.setTimeout(15000);
       http.addHeader("Content-Type", "text/plain");
@@ -1025,34 +1197,33 @@ void syncUserListToSheets() {
 
 void logActivityToSd(String event, String uid, String name, unsigned long duration, time_t event_time) {
   xSemaphoreTake(sdMutex, portMAX_DELAY);
-  String current_timestamp_str = getFormattedTime(time(nullptr));
   struct tm timeinfo;
   if (getLocalTime(&timeinfo)) {
     char logFilePath[40];
     strftime(logFilePath, sizeof(logFilePath), "/logs/%Y-%m-%d.csv", &timeinfo);
-    Serial.printf("[SD] Attempting to log event to: %s\n", logFilePath);
     
-    if(!SD.exists(LOGS_DIRECTORY)){
-        SD.mkdir(LOGS_DIRECTORY);
-    }
+    if(!SD.exists(LOGS_DIRECTORY)){ SD.mkdir(LOGS_DIRECTORY); }
     
-    String fullLogEntry = current_timestamp_str + "," + event + "," + uid + "," + name + "," + String(duration) + "," + formatDuration(duration);
     File localFile = SD.open(logFilePath, FILE_APPEND);
     if(localFile) {
-        if(localFile.size() == 0) { localFile.println("Timestamp,Action,UID,Name,Duration_sec,Duration_Formatted"); }
-        localFile.println(fullLogEntry);
+        if(localFile.size() == 0) {
+            localFile.println("Timestamp,Action,UID,Name,Duration_sec,Duration_Formatted");
+        }
+        String entry = getFormattedTime(time(nullptr)) + "," + event + "," + uid + "," + name + "," + String(duration) + "," + formatDuration(duration);
+        localFile.println(entry);
         localFile.close();
-        Serial.println("[SD] Log entry written successfully.");
+        Serial.printf("[SD] Log entry written to %s.\n", logFilePath);
     } else {
-        Serial.println("ERROR: Could not open log file for appending.");
+        Serial.printf("[SD] ERROR: Could not open %s for writing.\n", logFilePath);
     }
   }
+  
   File queueFile = SD.open(G_SHEETS_QUEUE_FILE, FILE_APPEND);
   if (queueFile) {
     String dataForSheet = "";
-    if (event == "ENTER") { dataForSheet = uid + "," + name + "," + getFormattedTime(event_time) + ","; } 
+    if (event == "ENTER") { dataForSheet = uid + "," + name + "," + getFormattedTime(event_time) + ","; }
     else if (event == "EXIT") { dataForSheet = uid + "," + name + ",," + getFormattedTime(time(nullptr)); }
-    if (dataForSheet != "") { 
+    if (dataForSheet != "") {
       queueFile.println(dataForSheet);
       Serial.println("[SD] Event added to Google Sheets upload queue.");
     }
@@ -1062,11 +1233,14 @@ void logActivityToSd(String event, String uid, String name, unsigned long durati
 }
 
 void updateDisplayMessage(String line1, String line2) {
-  lcd.clear();
-  lcd.setCursor((LCD_COLS - line1.length()) / 2, 0);
-  lcd.print(line1);
-  lcd.setCursor((LCD_COLS - line2.length()) / 2, 1);
-  lcd.print(line2);
+  if (xSemaphoreTake(lcdMutex, (TickType_t)20) == pdTRUE) {
+    lcd.clear();
+    lcd.setCursor((LCD_COLS - line1.length()) / 2, 0);
+    lcd.print(line1);
+    lcd.setCursor((LCD_COLS - line2.length()) / 2, 1);
+    lcd.print(line2);
+    xSemaphoreGive(lcdMutex);
+  }
 }
 
 void updateDisplayDateTime() {
@@ -1074,11 +1248,17 @@ void updateDisplayDateTime() {
   struct tm timeinfo;
   if (!getLocalTime(&timeinfo, 100)) { return; }
   if (timeinfo.tm_sec != lastSecond) {
-    lastSecond = timeinfo.tm_sec;
-    char dateStr[11]; char timeStr[9];
-    strftime(dateStr, sizeof(dateStr), "%d/%m/%Y", &timeinfo);
-    strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
-    updateDisplayMessage(String(dateStr), String(timeStr));
+    if (xSemaphoreTake(lcdMutex, (TickType_t)20) == pdTRUE) {
+      lastSecond = timeinfo.tm_sec;
+      char dateStr[11]; char timeStr[9];
+      strftime(dateStr, sizeof(dateStr), "%d/%m/%Y", &timeinfo);
+      strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
+      lcd.setCursor((LCD_COLS - strlen(dateStr)) / 2, 0);
+      lcd.print(dateStr);
+      lcd.setCursor((LCD_COLS - strlen(timeStr)) / 2, 1);
+      lcd.print(timeStr);
+      xSemaphoreGive(lcdMutex);
+    }
   }
 }
 
@@ -1101,27 +1281,19 @@ void checkForDailyReset() {
     entryTime.clear();
     lastDay = timeinfo.tm_yday;
     Serial.println("[System] Daily reset performed for user status.");
+    sendSystemAlertToTelegram("☀️ *Good Morning!* ☀️\n\n_All user statuses have been reset for the new day._");
   }
 }
 
 void playBuzzer(int status) {
   if (status == 1) { // ENTER
-    tone(BUZZER_PIN, BEEP_FREQUENCY, 150); 
-    vTaskDelay(180/portTICK_PERIOD_MS); 
-    tone(BUZZER_PIN, BEEP_FREQUENCY, 400); 
-  } 
-  else if (status == 0) { // EXIT
-    tone(BUZZER_PIN, BEEP_FREQUENCY, 100); 
-    vTaskDelay(120/portTICK_PERIOD_MS); 
-    tone(BUZZER_PIN, BEEP_FREQUENCY, 100); 
-    vTaskDelay(120/portTICK_PERIOD_MS); 
-    tone(BUZZER_PIN, BEEP_FREQUENCY, 100); 
-  } 
-  else if (status == 2) { // DENIED
-    tone(BUZZER_PIN, BEEP_FREQUENCY, 1000); 
+    tone(BUZZER_PIN, BEEP_FREQUENCY, 150); delay(180); tone(BUZZER_PIN, BEEP_FREQUENCY, 400);
+  } else if (status == 0) { // EXIT
+    tone(BUZZER_PIN, BEEP_FREQUENCY, 100); delay(120); tone(BUZZER_PIN, BEEP_FREQUENCY, 100); delay(120); tone(BUZZER_PIN, BEEP_FREQUENCY, 100);
+  } else if (status == 2) { // DENIED
+    tone(BUZZER_PIN, BEEP_FREQUENCY, 1000);
   }
 }
-
 
 void loadUsersFromSd() {
   xSemaphoreTake(sdMutex, portMAX_DELAY);
@@ -1137,7 +1309,7 @@ void loadUsersFromSd() {
     }
     file.close();
     Serial.printf("[SD] %d users loaded from SD card.\n", userDatabase.size());
-  } else { Serial.println("ERROR: Could not find users.csv file."); }
+  } else { Serial.println("[SD] ERROR: Could not find users.csv file."); }
   xSemaphoreGive(sdMutex);
 }
 
@@ -1152,13 +1324,9 @@ void setupTime() {
 String getUIDString(MFRC522::Uid uid) {
   String uidStr = "";
   for (byte i = 0; i < uid.size; i++) {
-    if (uid.uidByte[i] < 0x10) {
-      uidStr += "0";
-    }
+    if (uid.uidByte[i] < 0x10) uidStr += "0";
     uidStr += String(uid.uidByte[i], HEX);
-    if (i < uid.size - 1) {
-      uidStr += " ";
-    }
+    if (i < uid.size - 1) uidStr += " ";
   }
   uidStr.toUpperCase();
   return uidStr;
@@ -1182,46 +1350,32 @@ String formatDuration(unsigned long totalSeconds) {
   long hours = totalSeconds / 3600;
   long minutes = (totalSeconds % 3600) / 60;
   long seconds = totalSeconds % 60;
-  String formatted = "";
-  if (hours > 0) formatted += String(hours) + "h ";
-  if (minutes > 0) formatted += String(minutes) + "m ";
-  formatted += String(seconds) + "s";
-  return formatted;
+  char buf[20];
+  snprintf(buf, sizeof(buf), "%02ldh %02ldm %02lds", hours, minutes, seconds);
+  return String(buf);
 }
 
-
 void startAPMode() {
-  updateDisplayMessage("AP MODE ACTIVE", "Setup WiFi");
   WiFi.disconnect(true);
-  delay(100);
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ap_ssid);
-  
   IPAddress apIP = WiFi.softAPIP();
-  Serial.println("\n[Network Task] Starting Access Point for manual configuration.");
-  Serial.print("[Network Task] Connect to SSID: '");
-  Serial.print(ap_ssid);
-  Serial.print("' and browse to http://");
-  Serial.println(apIP);
-  
+
+  Serial.println("\n[Network Task] Starting Access Point mode.");
+  Serial.print("[Network Task] Connect to SSID: '"); Serial.print(ap_ssid);
+  Serial.print("' and go to http://"); Serial.println(apIP);
+
   updateDisplayMessage(ap_ssid, apIP.toString());
   
+  server.close(); // Clear old handlers from dashboard mode
   setupAPServer();
   server.begin();
   Serial.println("[Network Task] Web Server configured for WiFi Setup.");
-  
-  for(;;) {
-      server.handleClient();
-      vTaskDelay(10 / portTICK_PERIOD_MS);
-  }
 }
-
-
 
 void sendSystemAlertToTelegram(String message) {
   if (WiFi.status() != WL_CONNECTED) return;
   
-  // --- NEW: Create a local, isolated client and bot for this task ---
   WiFiClientSecure localClient;
   localClient.setInsecure();
   UniversalTelegramBot localBot(BOT_TOKEN, localClient);
@@ -1231,7 +1385,6 @@ void sendSystemAlertToTelegram(String message) {
     Serial.println("[Telegram] Failed to send system alert.");
   }
 }
-
 
 void sendTelegramNotification(String uid, String name, String action) {
   if (WiFi.status() != WL_CONNECTED) return;
@@ -1244,15 +1397,15 @@ void sendTelegramNotification(String uid, String name, String action) {
   String formattedTime = getFormattedTime(time(nullptr));
 
   if (action == "ENTER") {
-    message = "✅ *ENTERED* ✅\n\n*İsim:* " + name + "\n*UID:* `" + uid + "`\n*Zaman:* " + formattedTime;
+    message = "✅ *ENTERED* ✅\n\n*Name:* " + name + "\n*UID:* `" + uid + "`\n*Time:* " + formattedTime;
   } else if (action == "EXIT") {
-    message = "🚪 *JUST LEFT* 🚪\n\n*İsim:* " + name + "\n*UID:* `" + uid + "`\n*Zaman:* " + formattedTime;
+    message = "🚪 *JUST LEFT* 🚪\n\n*Name:* " + name + "\n*UID:* `" + uid + "`\n*Time:* " + formattedTime;
   } else if (action == "DENIED") {
-    message = "❌ *INVALID USER!!* ❌\n\n*UID:* `" + uid + "`\n*Zaman:* " + formattedTime;
+    message = "❌ *INVALID USER!!* ❌\n\n*UID:* `" + uid + "`\n*Time:* " + formattedTime;
   } else if (action == "USER_ADDED") {
-    message = "👤 *NEW USER ADDED* 👤\n\n*İsim:* " + name + "\n*UID:* `" + uid + "`";
+    message = "👤 *NEW USER ADDED* 👤\n\n*Name:* " + name + "\n*UID:* `" + uid + "`";
   } else if (action == "USER_DELETED") {
-    message = "🗑️ *USED DELETED* 🗑️\n\n*İsim:* " + name + "\n*UID:* `" + uid + "`";
+    message = "🗑️ *USER DELETED* 🗑️\n\n*Name:* " + name + "\n*UID:* `" + uid + "`";
   } else {
     return;
   }
